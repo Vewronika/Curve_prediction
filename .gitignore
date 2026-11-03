@@ -1,0 +1,25 @@
+# Python standard
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyCharm specific
+.idea/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Streamlit secrets (protects passwords later)
+.streamlit/secrets.toml
+
+# Project Data & Databases (Crucial to avoid merge conflicts)
+*.sqlite3
+*.db
+*.csv
+
+# OS generated files
+.DS_Store
+Thumbs.db
