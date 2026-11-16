@@ -6,7 +6,6 @@ from method import algorithm
 import plotly.express as px
 from data_acess.db_utils import fetch_all_dataset_names, fetch_companies_by_dataset
 
-
 st.set_page_config(page_title="Predictor Engine", layout="centered")
 
 if "step" not in st.session_state:
@@ -25,7 +24,7 @@ def reset_wizard():
     st.session_state.step = 1
 
 
-#track progress
+# track progress
 st.progress(st.session_state.step / 3.0, text=f"Step {st.session_state.step} of 3")
 st.markdown("---")
 
@@ -39,7 +38,6 @@ if st.session_state.step == 1:
     st.radio("Data Source", ["Live Market Data (yfinance)", "Upload Custom CSV"], key="data_source")
 
     if st.session_state.data_source == "Live Market Data (yfinance)":
-
         available_datasets = fetch_all_dataset_names()
         selected_dataset = st.selectbox("Select Market Portfolio", available_datasets)
 
@@ -47,28 +45,18 @@ if st.session_state.step == 1:
             companies_df = fetch_companies_by_dataset(selected_dataset)
             ui_labels = [f"{row['ticker']} - {row['company_name']}" for _, row in companies_df.iterrows()]
 
-            if selected_dataset:
-                companies_df = fetch_companies_by_dataset(selected_dataset)
-                ui_labels = [f"{row['ticker']} - {row['company_name']}" for _, row in companies_df.iterrows()]
-
-
-                with st.popover("See and Customize Companies", use_container_width=True):
-                    st.write("Tick or untick companies to include in the simulation:")
-
-                    selected_labels = st.multiselect(
-                        "Review and Filter Companies",
-                        options=ui_labels,
-                        default=ui_labels,
-                        key="ui_company_selection",
-                        label_visibility="collapsed"
-                    )
-
-                st.session_state.tickers = [label.split(" - ")[0].strip() for label in selected_labels]
-
-                st.success(f"{len(st.session_state.tickers)} companies actively selected for analysis.")
-
+            with st.popover("See and Customize Companies", use_container_width=True):
+                st.write("Tick or untick companies to include in the simulation:")
+                selected_labels = st.multiselect(
+                    "Review and Filter Companies",
+                    options=ui_labels,
+                    default=ui_labels,
+                    key="ui_company_selection",
+                    label_visibility="collapsed"
+                )
 
             st.session_state.tickers = [label.split(" - ")[0].strip() for label in selected_labels]
+            st.success(f"{len(st.session_state.tickers)} companies actively selected for analysis.")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.button("Next Step", on_click=next_step, type="primary")
@@ -114,7 +102,6 @@ elif st.session_state.step == 2:
 
     st.markdown("### Systemic Crash Definition")
 
-
     num_companies = len(st.session_state.get("tickers", []))
 
     st.slider(
@@ -122,7 +109,12 @@ elif st.session_state.step == 2:
         min_value=3,
         max_value=max(3, num_companies),
         value=max(3, num_companies // 2),
-        key="k_target"
+        key="k_target",
+        help="Defines how many simultaneous failures constitute a 'market crash'."
+    )
+
+    st.info(
+        f"**What this means:** You are asking the engine to calculate the probability that at least {st.session_state.k_target} out of the {num_companies} selected companies will crash at the exact same time."
     )
 
     total_needed = st.session_state.K_prior + st.session_state.K + 1
@@ -135,113 +127,125 @@ elif st.session_state.step == 2:
     with nav2:
         st.button("Run Physics Engine", on_click=next_step, type="primary")
 
-
-## ==========================================
+# ==========================================
 # STEP 3: LIVE EXECUTION & RESULTS
 # ==========================================
 elif st.session_state.step == 3:
     st.header("3. Analysis Results")
 
-    with st.spinner("Fetching live data and running statistical mechanics engine..."):
+    simulation_success = False
+
+    with st.status("Executing Stochastic Physics Engine...", expanded=True) as status:
         try:
-            # 1. Fetch data based on user choices
+            st.write("Fetching historical data from Yahoo Finance...")
             raw_df = provider.fetch_stock_data(
                 tickers=st.session_state.tickers,
                 end_date=st.session_state.target_date,
                 interval=st.session_state.frequency
             )
 
-
-
-            # 2. Slice the DataFrame
+            st.write(f"Structuring Matrix: {raw_df.shape[0]} days × {raw_df.shape[1]} assets...")
             P_prior, P, N = ma.df_to_math_inputs(raw_df, st.session_state.K_prior, st.session_state.K)
+
             k_target = st.session_state.k_target
 
-            # 3. Run the math
+            st.write("Calibrating Prior Drift and running Monte Carlo simulations...")
             results = algorithm.run_algorithm(P_prior, P, N, st.session_state.K_prior, st.session_state.K, k_target)
 
-            st.success("Engine Execution Complete.")
-
-            # --- ROW 1: Primary Metrics ---
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Systemic Crash Probability", f"{results['crash_probability'] * 100:.4f}%")
-            m2.metric("Equilibrium Default Prob (p*)", f"{results['p_star']:.4f}")
-            m3.metric("Target Crash Fraction (q)", f"{results['q']:.2f}")
-
-            # --- ROW 2: Advanced Physics Metrics ---
-            st.markdown("<br>", unsafe_allow_html=True)
-            m4, m5, m6 = st.columns(3)
-            m4.metric("Large Deviation Exponent", f"{results['exponent']:.4f}")
-            m5.metric("Rate Function (I_q)", f"{results['I_q']:.4f}")
-            m6.metric("Total Assets (N) / Target (k)", f"{results['N']} / {results['k']}")
-
-            # Warning if underflow occurred during math calculation
-            if results['underflow_flag']:
-                st.warning("Precision Warning: An underflow occurred in the probability calculation. Results may be extreme approximations.")
-
-            st.markdown("---")
-            st.subheader("Trajectory Visualization")
-
-            # 1. Slice the raw DataFrame to exactly the days used in the math
-            total_days = st.session_state.K_prior + st.session_state.K + 1
-            plot_df = raw_df.iloc[-total_days:]
-
-            # 2. Normalize prices safely using .div()
-            plot_df_normalized = plot_df.div(plot_df.iloc[0], axis=1)
-
-            # 3. Build the Plotly line chart
-            fig = px.line(
-                plot_df_normalized,
-                labels={"value": "Normalized Price (1.0 = Start)", "index": "Date", "variable": "Ticker"},
-                title="Asset Trajectories (Prior Drift vs. Active Window)"
-            )
-
-            # --- NEW UX MAGIC: The "Ghosting" Technique ---
-            # Make all individual companies faint and gray
-            fig.update_traces(line=dict(color="rgba(150, 150, 150, 0.15)", width=1))
-
-            # Calculate and overlay the "Portfolio Average" in a bold, bright color
-            portfolio_avg = plot_df_normalized.mean(axis=1)
-            fig.add_scatter(
-                x=portfolio_avg.index,
-                y=portfolio_avg,
-                mode='lines',
-                name='Portfolio Average',
-                line=dict(color='#00d4ff', width=4)  # Bright cyan/blue
-            )
-            # ----------------------------------------------
-
-            # 4. Safely extract the date natively
-            split_date = plot_df_normalized.index[st.session_state.K_prior]
-
-            # 5. Draw the boundary line
-            fig.add_vline(
-                x=split_date,
-                line_dash="dash",
-                line_color="red"
-            )
-
-            # 6. Add the text safely at the top of the chart
-            fig.add_annotation(
-                x=split_date,
-                y=1.05,
-                yref="paper",
-                text="Active Window Start ➔",
-                showarrow=False,
-                font=dict(color="red")
-            )
-
-            # Hide the legend and create a unified hover tooltip
-            fig.update_layout(showlegend=False, hovermode="x unified")
-
-            # Render it in Streamlit!
-            st.plotly_chart(fig, use_container_width=True)
+            status.update(label="Engine Execution Complete!", state="complete", expanded=False)
+            simulation_success = True
 
         except Exception as e:
             st.error(f"Error running pipeline: {e}")
             st.info("Check if your target date has enough historical data for the selected interval.")
+            status.update(label="Execution Failed", state="error", expanded=False)
+
+    # ==========================================
+    # OUTPUT LAYOUT
+    # ==========================================
+    if simulation_success:
+        st.markdown("---")
+        st.header("Simulation Results")
+
+        # --- SECTION 1: DATA INPUT SUMMARY ---
+        st.subheader("1. Configuration Summary")
+        st.caption("The parameters used for this mathematical simulation.")
+
+        sum_col1, sum_col2, sum_col3 = st.columns(3)
+        sum_col1.metric("Anchor Date", str(st.session_state.target_date))
+        sum_col2.metric("Portfolio Size (N)", f"{N} Assets")
+        sum_col3.metric("Crash Threshold (k)", f"{k_target} Assets")
+
+        sum_col4, sum_col5, sum_col6 = st.columns(3)
+        sum_col4.metric("Data Frequency", st.session_state.frequency)
+        sum_col5.metric("Prior Drift Window", f"{st.session_state.K_prior} steps")
+        sum_col6.metric("Active Sim Window", f"{st.session_state.K} steps")
+
+        st.markdown("---")
+
+        # --- SECTION 2: MATH OUTPUT ---
+        st.subheader("2. Macro State Variables")
+        st.caption("Internal metrics calculated by the stochastic physics engine.")
+
+        math_col1, math_col2, math_col3 = st.columns(3)
+        math_col1.metric("Target Fraction (q)", f"{results['q']:.4f}", help="k / N")
+        math_col2.metric("Equilibrium Default (p*)", f"{results['p_star']:.4f}",
+                         help="Single-stock default probability")
+        math_col3.metric("Rate Function (I*)", f"{results['I_q']:.4f}", help="Large deviation rate")
+
+        st.markdown("---")
+
+        # --- SECTION 3: THE BOTTOM LINE ---
+        st.subheader("3. Systemic Crash Risk")
+
+        # Convert probability to a percentage for readability
+        crash_prob_pct = results['crash_probability'] * 100
 
 
-            
+        st.info(
+            f"### Probability of $\ge {k_target}$ simultaneous crashes: \n"
+            f"# **{crash_prob_pct:.4f} %**"
+        )
+
+        st.markdown("---")
+        st.subheader("Trajectory Visualization")
+
+        total_days = st.session_state.K_prior + st.session_state.K + 1
+        plot_df = raw_df.iloc[-total_days:]
+        plot_df_normalized = plot_df.div(plot_df.iloc[0], axis=1)
+
+        fig = px.line(
+            plot_df_normalized,
+            labels={"value": "Normalized Price (1.0 = Start)", "index": "Date", "variable": "Ticker"},
+            title="Asset Trajectories (Prior Drift vs. Active Window)"
+        )
+        fig.update_traces(line=dict(color="rgba(150, 150, 150, 0.15)", width=1))
+
+        portfolio_avg = plot_df_normalized.mean(axis=1)
+        fig.add_scatter(
+            x=portfolio_avg.index,
+            y=portfolio_avg,
+            mode='lines',
+            name='Portfolio Average',
+            line=dict(color='#00d4ff', width=4)
+        )
+
+        split_date = plot_df_normalized.index[st.session_state.K_prior]
+        fig.add_vline(
+            x=split_date,
+            line_dash="dash",
+            line_color="red"
+        )
+        fig.add_annotation(
+            x=split_date,
+            y=1.05,
+            yref="paper",
+            text="Active Window Start ➔",
+            showarrow=False,
+            font=dict(color="red")
+        )
+        fig.update_layout(showlegend=False, hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
+
     st.markdown("<br>", unsafe_allow_html=True)
     st.button("Run New Simulation", on_click=reset_wizard)
