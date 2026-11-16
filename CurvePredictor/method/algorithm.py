@@ -123,7 +123,7 @@ def run_algorithm(P_prior, P, N, K_prior, K, k_target):
     print(f"Stage 3 -> Calibrated beta*: {beta_star:.6f}")
     print(f"Stage 3 -> Energy check E(beta*): {E_check:.6f} vs H_real: {H_real:.6f}")
 
-    k_target = 3  # at least 3
+    #k_target = 3  # at least 3
     result = predict_systemic_crash(k_target, N, w_star, d, L, W, beta_star)
 
     print("\n--- STAGE 4 FINAL RESULTS ---")

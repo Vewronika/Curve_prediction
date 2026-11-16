@@ -111,6 +111,19 @@ elif st.session_state.step == 2:
         with c2:
             st.number_input("Prior Window (K_prior)", min_value=1, value=st.session_state.future_k, key="K_prior")
 
+    st.markdown("### Systemic Crash Definition")
+
+
+    num_companies = len(st.session_state.get("tickers", []))
+
+    st.slider(
+        f"How many companies out of {num_companies} must default to trigger a 'Systemic Crash' (k)?",
+        min_value=3,
+        max_value=max(3, num_companies),
+        value=max(3, num_companies // 2),
+        key="k_target"
+    )
+
     total_needed = st.session_state.K_prior + st.session_state.K + 1
     st.caption(
         f"**Data Requirement:** The pipeline will pull {total_needed} '{st.session_state.frequency}' intervals ending on {st.session_state.target_date}.")
@@ -141,7 +154,7 @@ elif st.session_state.step == 3:
 
             # 2. Slice the DataFrame
             P_prior, P, N = ma.df_to_math_inputs(raw_df, st.session_state.K_prior, st.session_state.K)
-            k_target = len(st.session_state.tickers) // 2
+            k_target = st.session_state.k_target
 
             # 3. Run the math
             results = algorithm.run_algorithm(P_prior, P, N, st.session_state.K_prior, st.session_state.K, k_target)
