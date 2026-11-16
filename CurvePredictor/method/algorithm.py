@@ -135,6 +135,7 @@ def run_algorithm(P_prior, P, N, K_prior, K, k_target):
     print(f"Crash Probability P_N(Crash_{{k,N}}):         {result['crash_probability']:.6e}")
     print(f"Log Crash Probability:                      {result['log_crash_probability']:.6f}")
 
+    return result
 
 
 def solve_weights_and_energy(beta, L, W, tolerance=1e-8, max_iterations=500):

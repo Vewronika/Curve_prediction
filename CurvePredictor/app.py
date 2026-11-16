@@ -1,16 +1,26 @@
 import streamlit as st
 
-st.set_page_config(page_title="Curve Prediction", layout="wide")
+st.set_page_config(
+    page_title="Curve predictor",
+    layout="centered"
+)
 
-st.title("Curve Prediction Dashboard")
-st.sidebar.header("Configuration")
+st.title("Systemic Risk & Market Combinatorics")
+st.subheader("A Heterogeneous Ensemble Approach to Crash Prediction")
 
-dataset = st.sidebar.selectbox("Choose Data", ["tech_stocks_01", "Upload CSV..."])
+st.markdown("---")
 
-if dataset == "Upload CSV...":
-    uploaded_file = st.file_uploader("Upload your CSV file")
-else:
-    st.write(f"Querying SQLite for: **{dataset}**")
+st.markdown("""
+### Project Overview
+Traditional Machine Learning struggles to predict "Black Swan" market crashes because it relies on historical pattern repetition. Statistical Mechanics, however, treats the market as a physical system, measuring realized energy and pairwise interactions to calculate the probability of extreme deviations.
 
-if st.button("Run Prediction"):
-    st.success("Layered Architecture is ready to be built!")
+This diploma project fuses both disciplines:
+1. **The Physics Engine:** Uses Large Deviations Theory to calculate the thermodynamic probability of a systemic crash.
+2. **The Meta-Learner:** A Layer 2 AI that optimally weights the physics-based predictions against standard ML baselines.
+
+### How to use this tool:
+**Select a module from the sidebar to begin.**
+* **Predictor Engine:** Run live Yahoo Finance data through the step-by-step stochastic physics model.
+* **ML Meta-Learner:** Compare the physics model against the Machine Learning ensemble.
+""")
+
