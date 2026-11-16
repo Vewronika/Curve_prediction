@@ -3,6 +3,7 @@ import datetime
 from data_acess import provider
 from data_acess import math_adapter as ma
 from method import algorithm
+import plotly.express as px
 from data_acess.db_utils import fetch_all_dataset_names, fetch_companies_by_dataset
 
 
@@ -180,11 +181,67 @@ elif st.session_state.step == 3:
 
             st.markdown("---")
             st.subheader("Trajectory Visualization")
-            st.info("(Next Step: Plotly charts here)")
+
+            # 1. Slice the raw DataFrame to exactly the days used in the math
+            total_days = st.session_state.K_prior + st.session_state.K + 1
+            plot_df = raw_df.iloc[-total_days:]
+
+            # 2. Normalize prices safely using .div()
+            plot_df_normalized = plot_df.div(plot_df.iloc[0], axis=1)
+
+            # 3. Build the Plotly line chart
+            fig = px.line(
+                plot_df_normalized,
+                labels={"value": "Normalized Price (1.0 = Start)", "index": "Date", "variable": "Ticker"},
+                title="Asset Trajectories (Prior Drift vs. Active Window)"
+            )
+
+            # --- NEW UX MAGIC: The "Ghosting" Technique ---
+            # Make all individual companies faint and gray
+            fig.update_traces(line=dict(color="rgba(150, 150, 150, 0.15)", width=1))
+
+            # Calculate and overlay the "Portfolio Average" in a bold, bright color
+            portfolio_avg = plot_df_normalized.mean(axis=1)
+            fig.add_scatter(
+                x=portfolio_avg.index,
+                y=portfolio_avg,
+                mode='lines',
+                name='Portfolio Average',
+                line=dict(color='#00d4ff', width=4)  # Bright cyan/blue
+            )
+            # ----------------------------------------------
+
+            # 4. Safely extract the date natively
+            split_date = plot_df_normalized.index[st.session_state.K_prior]
+
+            # 5. Draw the boundary line
+            fig.add_vline(
+                x=split_date,
+                line_dash="dash",
+                line_color="red"
+            )
+
+            # 6. Add the text safely at the top of the chart
+            fig.add_annotation(
+                x=split_date,
+                y=1.05,
+                yref="paper",
+                text="Active Window Start ➔",
+                showarrow=False,
+                font=dict(color="red")
+            )
+
+            # Hide the legend and create a unified hover tooltip
+            fig.update_layout(showlegend=False, hovermode="x unified")
+
+            # Render it in Streamlit!
+            st.plotly_chart(fig, use_container_width=True)
 
         except Exception as e:
             st.error(f"Error running pipeline: {e}")
             st.info("Check if your target date has enough historical data for the selected interval.")
 
+
+            
     st.markdown("<br>", unsafe_allow_html=True)
     st.button("Run New Simulation", on_click=reset_wizard)
