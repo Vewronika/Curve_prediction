@@ -4,6 +4,8 @@ from data_acess import provider
 from data_acess import math_adapter as ma
 from method import algorithm
 import plotly.express as px
+import pandas as pd
+from data_acess.provider import parse_uploaded_csv
 from data_acess.db_utils import fetch_all_dataset_names, fetch_companies_by_dataset
 
 st.set_page_config(page_title="Predictor Engine", layout="centered")
@@ -58,8 +60,28 @@ if st.session_state.step == 1:
             st.session_state.tickers = [label.split(" - ")[0].strip() for label in selected_labels]
             st.success(f"{len(st.session_state.tickers)} companies actively selected for analysis.")
 
+    else:
+        st.info(
+            "**Format requirement:** The first column must be Dates. All other columns should be the asset prices (with Tickers as headers).")
+        uploaded_file = st.file_uploader("Upload your portfolio dataset", type=["csv"])
+        if uploaded_file is not None and parse_uploaded_csv(uploaded_file):
+            custom_df = pd.read_csv(uploaded_file, index_col=0, parse_dates=True)
+            st.session_state.custom_df = custom_df
+            st.session_state.tickers = list(custom_df.columns)
+            st.success(
+                f"Successfully loaded {len(st.session_state.tickers)} assets and {len(custom_df)} trading periods.")
+            with st.expander("Preview Uploaded Data"):
+                st.dataframe(custom_df.head())
+
     st.markdown("<br>", unsafe_allow_html=True)
-    st.button("Next Step", on_click=next_step, type="primary")
+
+    block_next_step = False
+    if st.session_state.data_source == "Upload Custom CSV" and "custom_df" not in st.session_state:
+        block_next_step = True
+        st.warning("Please upload a CSV file to continue.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.button("Next Step", on_click=next_step, type="primary", disabled=block_next_step)
 
 # ==========================================
 # STEP 2: TIMEFRAME & MATH CONFIGURATION
@@ -78,13 +100,13 @@ elif st.session_state.step == 2:
     with col2:
         st.selectbox(
             "Data Frequency",
-            options=["1h", "1d", "1wk"],
-            format_func=lambda x: {"1h": "Hourly", "1d": "Daily", "1wk": "Weekly"}[x],
+            options=["1d", "1h", "1wk"],
+            format_func=lambda x: {"1d": "Daily", "1h": "Hourly", "1wk": "Weekly"}[x],
             key="frequency"
         )
 
     st.markdown("### Window Calibration")
-    st.number_input("Prediction Horizon (Steps)", min_value=1, value=21, key="future_k")
+    st.number_input("Prediction Horizon (Steps)", min_value=1, value=30, key="future_k")
 
     advanced_mode = st.toggle("Advanced / Custom Mode")
 
@@ -137,12 +159,16 @@ elif st.session_state.step == 3:
 
     with st.status("Executing Stochastic Physics Engine...", expanded=True) as status:
         try:
-            st.write("Fetching historical data from Yahoo Finance...")
-            raw_df = provider.fetch_stock_data(
-                tickers=st.session_state.tickers,
-                end_date=st.session_state.target_date,
-                interval=st.session_state.frequency
-            )
+            if st.session_state.data_source == "Live Market Data (yfinance)":
+                st.write("Fetching historical data from Yahoo Finance...")
+                raw_df = provider.fetch_stock_data(
+                    tickers=st.session_state.tickers,
+                    end_date=st.session_state.target_date,
+                    interval=st.session_state.frequency
+                )
+            else:
+                st.write("Processing custom uploaded portfolio data...")
+                raw_df = st.session_state.custom_df.dropna(axis=1)
 
             st.write(f"Structuring Matrix: {raw_df.shape[0]} days × {raw_df.shape[1]} assets...")
             P_prior, P, N = ma.df_to_math_inputs(raw_df, st.session_state.K_prior, st.session_state.K)

@@ -21,7 +21,7 @@ def setup_database():
             "name_col": "Company"
         },
         "Dow Jones": {
-            "url": "https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies",  # <-- NEW URL!
+            "url": "https://en.wikipedia.org/wiki/List_of_Dow_Jones_Industrial_Average_companies",
             "ticker_col": "Symbol",
             "name_col": "Company"
         }
@@ -57,13 +57,12 @@ def setup_database():
                        (
                            dataset_id INTEGER,
                            company_id INTEGER,
+                           company_rank INTEGER NOT NULL,
                            PRIMARY KEY (dataset_id, company_id),
                            FOREIGN KEY (dataset_id) REFERENCES dataset(dataset_id),
                            FOREIGN KEY (company_id) REFERENCES company(company_id)
                            )
                        ''')
-
-
 
 
         for dataset, config in wiki_datasets.items():
@@ -93,25 +92,26 @@ def setup_database():
                         company_table = table
                         actual_ticker_col = t_col
                         actual_name_col = n_col
+
                         break
 
                 if company_table is None:
-                    print(f"  -> Could not find a valid table for {dataset}, skipping.")
+                    print(f"Could not find a valid table for {dataset}, skipping.")
                     continue
 
                 company_table[actual_ticker_col] = company_table[actual_ticker_col].str.replace('.', '-', regex=False)
 
-                companies = list(zip(company_table[actual_ticker_col], company_table[actual_name_col]))
+                company_table['company_rank'] = range(1, len(company_table) + 1)
+
+                companies = list(zip(company_table[actual_ticker_col], company_table[actual_name_col], company_table['company_rank']))
 
                 cursor.executemany('''
-                                   INSERT
-                                   OR IGNORE INTO company (ticker, company_name)
+                                   INSERT OR IGNORE INTO company (ticker, company_name)
                                             VALUES (?, ?)
-                                   ''', companies)
+                                   ''', [(comp[0], comp[1]) for comp in companies])
 
                 cursor.execute('''
-                               INSERT
-                               OR IGNORE INTO dataset (dataset_name) 
+                               INSERT OR IGNORE INTO dataset (dataset_name) 
                                             VALUES (?)
                                ''', (dataset,))
 
@@ -120,19 +120,23 @@ def setup_database():
 
                 tickers = [comp[0] for comp in companies]
                 placeholders = ','.join(['?'] * len(tickers))
-                cursor.execute(f"SELECT company_id FROM company WHERE ticker IN ({placeholders})", tickers)
-                company_ids = cursor.fetchall()
+                cursor.execute(f"SELECT ticker, company_id FROM company WHERE ticker IN ({placeholders})", tickers)
+                ticker_to_id = {row[0]: row[1] for row in cursor.fetchall()}
 
-                join_records = [(dataset_id, cid[0]) for cid in company_ids]
+                join_records = []
+                for ticker, name, rank in companies:
+                    if ticker in ticker_to_id:
+                        company_id = ticker_to_id[ticker]
+                        join_records.append((dataset_id, company_id, rank))
+
                 cursor.executemany('''
-                                   INSERT
-                                   OR IGNORE INTO company_dataset (dataset_id, company_id)
-                                                VALUES (?, ?)
+                                   INSERT OR IGNORE INTO company_dataset (dataset_id, company_id, company_rank)
+                                                VALUES (?, ?, ?)
                                    ''', join_records)
                 print(f"Successfully loaded {len(companies)} companies for {dataset}.")
 
             except Exception as e:
-                print(f"  -> Error scraping {dataset}: {e}")
+                print(f"Error scraping {dataset}: {e}")
 
 
 
