@@ -25,8 +25,6 @@ def prev_step():
 def reset_wizard():
     st.session_state.step = 1
 
-
-# track progress
 st.progress(st.session_state.step / 3.0, text=f"Step {st.session_state.step} of 3")
 st.markdown("---")
 
@@ -35,7 +33,7 @@ st.markdown("---")
 # ==========================================
 if st.session_state.step == 1:
     st.header("1. Dataset Selection")
-    st.write("First, choose where your data is coming from and which assets to analyze.")
+    st.write("Choose where the data is coming from and which assets to analyze.")
 
     st.radio("Data Source", ["Live Market Data (yfinance)", "Upload Custom CSV"], key="data_source")
 
@@ -45,7 +43,22 @@ if st.session_state.step == 1:
 
         if selected_dataset:
             companies_df = fetch_companies_by_dataset(selected_dataset)
-            ui_labels = [f"{row['ticker']} - {row['company_name']}" for _, row in companies_df.iterrows()]
+            total_companies = len(companies_df)
+
+            st.session_state.all_dataset_tickers = companies_df['ticker'].tolist()
+
+            st.markdown("### Select Market Cap Slice")
+            rank_start, rank_end = st.slider(
+                "Filter by Company Rank (1 = Largest)",
+                min_value=1,
+                max_value=total_companies,
+                value=(1, min(50, total_companies)),
+                help="Select a range to analyze (e.g., Top 50, or Mid-Cap 100-200)."
+            )
+
+            sliced_df = companies_df.iloc[rank_start - 1: rank_end]
+
+            ui_labels = [f"{row['ticker']} - {row['company_name']}" for _, row in sliced_df.iterrows()]
 
             with st.popover("See and Customize Companies", use_container_width=True):
                 st.write("Tick or untick companies to include in the simulation:")
@@ -160,9 +173,11 @@ elif st.session_state.step == 3:
     with st.status("Executing Stochastic Physics Engine...", expanded=True) as status:
         try:
             if st.session_state.data_source == "Live Market Data (yfinance)":
-                st.write("Fetching historical data from Yahoo Finance...")
-                raw_df = provider.fetch_stock_data(
-                    tickers=st.session_state.tickers,
+                st.write("Fetching historical market data...")
+
+                raw_df = provider.get_sliced_portfolio(
+                    all_tickers=st.session_state.all_dataset_tickers,
+                    selected_tickers=st.session_state.tickers,
                     end_date=st.session_state.target_date,
                     interval=st.session_state.frequency
                 )
