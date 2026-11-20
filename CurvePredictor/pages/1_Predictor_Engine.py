@@ -10,6 +10,15 @@ from data_acess.db_utils import fetch_all_dataset_names, fetch_companies_by_data
 
 st.set_page_config(page_title="Predictor Engine", layout="centered")
 
+if "data_source" not in st.session_state:
+    st.session_state.data_source = "Live Market Data (yfinance)"
+
+if "_data_source_widget" not in st.session_state:
+    st.session_state._data_source_widget = st.session_state.data_source
+
+def save_data_source():
+    st.session_state.data_source = st.session_state._data_source_widget
+
 if "step" not in st.session_state:
     st.session_state.step = 1
 
@@ -35,7 +44,12 @@ if st.session_state.step == 1:
     st.header("1. Dataset Selection")
     st.write("Choose where the data is coming from and which assets to analyze.")
 
-    st.radio("Data Source", ["Live Market Data (yfinance)", "Upload Custom CSV"], key="data_source")
+    st.radio(
+        "Data Source",
+        ["Live Market Data (yfinance)", "Upload Custom CSV"],
+        key="_data_source_widget",
+        on_change=save_data_source,
+    )
 
     if st.session_state.data_source == "Live Market Data (yfinance)":
         available_datasets = fetch_all_dataset_names()
@@ -73,18 +87,47 @@ if st.session_state.step == 1:
             st.session_state.tickers = [label.split(" - ")[0].strip() for label in selected_labels]
             st.success(f"{len(st.session_state.tickers)} companies actively selected for analysis.")
 
+
+
     else:
+
         st.info(
-            "**Format requirement:** The first column must be Dates. All other columns should be the asset prices (with Tickers as headers).")
-        uploaded_file = st.file_uploader("Upload your portfolio dataset", type=["csv"])
-        if uploaded_file is not None and parse_uploaded_csv(uploaded_file):
-            custom_df = pd.read_csv(uploaded_file, index_col=0, parse_dates=True)
-            st.session_state.custom_df = custom_df
-            st.session_state.tickers = list(custom_df.columns)
-            st.success(
-                f"Successfully loaded {len(st.session_state.tickers)} assets and {len(custom_df)} trading periods.")
-            with st.expander("Preview Uploaded Data"):
-                st.dataframe(custom_df.head())
+            "**Format requirement:** The first column must contain dates. "
+            "All other columns must contain positive numeric asset prices, "
+            "with ticker symbols as headers. Dates must be unique and "
+            "ordered from oldest to newest. Missing prices are not allowed."
+        )
+
+        uploaded_file = st.file_uploader(
+            "Upload your portfolio dataset",
+            type=["csv"],
+        )
+
+        if uploaded_file is not None:
+            try:
+                custom_df = parse_uploaded_csv(uploaded_file)
+                st.session_state.custom_df = custom_df
+
+                st.session_state.tickers = list(custom_df.columns)
+
+                st.success(
+                    f"Successfully loaded {len(custom_df.columns)} assets "
+                    f"and {len(custom_df)} trading periods."
+                )
+
+                with st.expander("Preview Uploaded Data"):
+                    st.dataframe(custom_df.head())
+
+            except ValueError as exc:
+                st.session_state.pop("custom_df", None)
+                st.session_state.pop("tickers", None)
+                st.error(f"Invalid CSV: {exc}")
+
+            except Exception:
+                st.session_state.pop("custom_df", None)
+                st.session_state.pop("tickers", None)
+                st.error("Could not process the uploaded file. Check its format.")
+
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -139,6 +182,21 @@ elif st.session_state.step == 2:
 
     num_companies = len(st.session_state.get("tickers", []))
 
+    if num_companies >= 3:
+        # Reset a stale selection if the portfolio has changed.
+        previous_k = st.session_state.get("k_target")
+        if previous_k is not None and not (3 <= previous_k <= num_companies):
+            st.session_state.pop("k_target", None)
+
+        default_k = min(max(3, num_companies // 2), num_companies)
+
+    else:
+        # No valid threshold exists for a portfolio with fewer than 3 assets.
+        st.session_state.pop("k_target", None)
+        st.warning(
+            "Select at least 3 companies before running the physics engine."
+        )
+
     st.slider(
         f"How many companies out of {num_companies} must default to trigger a 'Systemic Crash' (k)?",
         min_value=3,
@@ -157,10 +215,17 @@ elif st.session_state.step == 2:
         f"**Data Requirement:** The pipeline will pull {total_needed} '{st.session_state.frequency}' intervals ending on {st.session_state.target_date}.")
 
     nav1, nav2 = st.columns([1, 4])
+
     with nav1:
         st.button("Back", on_click=prev_step)
+
     with nav2:
-        st.button("Run Physics Engine", on_click=next_step, type="primary")
+        st.button(
+            "Run Physics Engine",
+            on_click=next_step,
+            type="primary",
+            disabled=num_companies < 3,
+        )
 
 # ==========================================
 # STEP 3: LIVE EXECUTION & RESULTS
@@ -181,14 +246,34 @@ elif st.session_state.step == 3:
                     end_date=st.session_state.target_date,
                     interval=st.session_state.frequency
                 )
+
             else:
                 st.write("Processing custom uploaded portfolio data...")
-                raw_df = st.session_state.custom_df.dropna(axis=1)
+                raw_df = st.session_state.custom_df.copy()
 
-            st.write(f"Structuring Matrix: {raw_df.shape[0]} days × {raw_df.shape[1]} assets...")
-            P_prior, P, N = ma.df_to_math_inputs(raw_df, st.session_state.K_prior, st.session_state.K)
+            st.write(
+                f"Structuring Matrix: {raw_df.shape[0]} periods × {raw_df.shape[1]} assets..."
+            )
 
-            k_target = st.session_state.k_target
+            if raw_df.shape[1] < 3:
+                raise ValueError("The physics engine requires at least 3 assets.")
+
+            K = st.session_state.K
+            K_prior = st.session_state.K_prior
+            k_target = st.session_state.get("k_target")
+
+            if K < 1 or K_prior < 1:
+                raise ValueError("Both time windows must be at least 1 step.")
+
+            if k_target is None or not (3 <= k_target <= raw_df.shape[1]):
+                raise ValueError(
+                    "The crash threshold must be between 3 and the number of selected assets."
+                )
+
+            P_prior, P, N = ma.df_to_math_inputs(raw_df, K_prior, K)
+
+            if N != raw_df.shape[1]:
+                raise ValueError("The asset count does not match the input data.")
 
             st.write("Calibrating Prior Drift and running Monte Carlo simulations...")
             results = algorithm.run_algorithm(P_prior, P, N, st.session_state.K_prior, st.session_state.K, k_target)
@@ -196,10 +281,21 @@ elif st.session_state.step == 3:
             status.update(label="Engine Execution Complete!", state="complete", expanded=False)
             simulation_success = True
 
+
         except Exception as e:
             st.error(f"Error running pipeline: {e}")
-            st.info("Check if your target date has enough historical data for the selected interval.")
-            status.update(label="Execution Failed", state="error", expanded=False)
+
+            if isinstance(e, ValueError):
+                st.info(
+                    "Check the input data, selected assets, parameters, "
+                    "and available historical data."
+                )
+
+            status.update(
+                label="Execution Failed",
+                state="error",
+                expanded=False,
+            )
 
     # ==========================================
     # OUTPUT LAYOUT
