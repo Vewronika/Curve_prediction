@@ -10,17 +10,14 @@ from data_acess.db_utils import fetch_all_dataset_names, fetch_companies_by_data
 
 st.set_page_config(page_title="Predictor Engine", layout="centered")
 
+if "step" not in st.session_state:
+    st.session_state.step = 1
 if "data_source" not in st.session_state:
     st.session_state.data_source = "Live Market Data (yfinance)"
 
-if "_data_source_widget" not in st.session_state:
-    st.session_state._data_source_widget = st.session_state.data_source
 
-def save_data_source():
+def sync_data_source():
     st.session_state.data_source = st.session_state._data_source_widget
-
-if "step" not in st.session_state:
-    st.session_state.step = 1
 
 
 def next_step():
@@ -44,49 +41,68 @@ if st.session_state.step == 1:
     st.header("1. Dataset Selection")
     st.write("Choose where the data is coming from and which assets to analyze.")
 
-    st.radio(
-        "Data Source",
-        ["Live Market Data (yfinance)", "Upload Custom CSV"],
-        key="_data_source_widget",
-        on_change=save_data_source,
-    )
+    st.radio("Data Source", ["Live Market Data (yfinance)", "Upload Custom CSV"], key="_data_source_widget", on_change=sync_data_source)
 
     if st.session_state.data_source == "Live Market Data (yfinance)":
         available_datasets = fetch_all_dataset_names()
-        selected_dataset = st.selectbox("Select Market Portfolio", available_datasets)
+        if not available_datasets:
+            st.error("No company universes are available in the local database. Run `python setup_db.py` from the project directory to initialize/refresh them.")
+        else:
+            default_dataset = "S&P 500" if "S&P 500" in available_datasets else available_datasets[0]
+            selected_dataset = st.selectbox("Select Market Universe", available_datasets,
+                                             index=available_datasets.index(default_dataset))
 
-        if selected_dataset:
             companies_df = fetch_companies_by_dataset(selected_dataset)
             total_companies = len(companies_df)
+            st.session_state.all_dataset_tickers = companies_df["ticker"].tolist()
 
-            st.session_state.all_dataset_tickers = companies_df['ticker'].tolist()
-
-            st.markdown("### Select Market Cap Slice")
-            rank_start, rank_end = st.slider(
-                "Filter by Company Rank (1 = Largest)",
-                min_value=1,
-                max_value=total_companies,
-                value=(1, min(50, total_companies)),
-                help="Select a range to analyze (e.g., Top 50, or Mid-Cap 100-200)."
+            st.caption(
+                "These are current index constituents from the last successful database refresh. "
+                "Historical membership is not reconstructed yet, so backtests can have survivorship bias."
             )
+            if "market_cap_usd" in companies_df and companies_df["market_cap_usd"].notna().any():
+                st.info("This universe has dated market-cap metadata; companies are ordered by available market cap.")
+            else:
+                st.warning("The current rank is source-list order, **not market-cap rank**. Use explicit company selection; similar company sizes are not guaranteed.")
 
-            sliced_df = companies_df.iloc[rank_start - 1: rank_end]
-
-            ui_labels = [f"{row['ticker']} - {row['company_name']}" for _, row in sliced_df.iterrows()]
-
-            with st.popover("See and Customize Companies", use_container_width=True):
-                st.write("Tick or untick companies to include in the simulation:")
-                selected_labels = st.multiselect(
-                    "Review and Filter Companies",
-                    options=ui_labels,
-                    default=ui_labels,
-                    key="ui_company_selection",
-                    label_visibility="collapsed"
+            if total_companies:
+                rank_start, rank_end = st.slider(
+                    "Choose a range from the universe list",
+                    min_value=1,
+                    max_value=total_companies,
+                    value=(1, min(50, total_companies)),
+                    key="company_range",
+                    help="This range follows the displayed ordering. It is not a market-cap slice unless dated market-cap data is available."
                 )
+                sliced_df = companies_df.iloc[rank_start - 1: rank_end]
+                ui_labels = [f"{row['ticker']} - {row['company_name']}" for _, row in sliced_df.iterrows()]
 
-            st.session_state.tickers = [label.split(" - ")[0].strip() for label in selected_labels]
-            st.success(f"{len(st.session_state.tickers)} companies actively selected for analysis.")
+                # The range slider changes the available multiselect options.
+                # Reset selection when either the universe or range changes so
+                # Streamlit cannot retain values that are no longer valid options.
+                selection_context = (selected_dataset, rank_start, rank_end)
+                if st.session_state.get("_company_selection_context") != selection_context:
+                    st.session_state["ui_company_selection"] = ui_labels.copy()
+                    st.session_state["_company_selection_context"] = selection_context
+                elif "ui_company_selection" not in st.session_state:
+                    st.session_state["ui_company_selection"] = ui_labels.copy()
 
+                with st.popover("See and Customize Companies", use_container_width=True):
+                    st.write("Select the companies to include. Changing the range above resets the selection to all companies in that range. Incomplete assets may be excluded and replaced from this same universe.")
+                    selected_labels = st.multiselect(
+                        "Review and Filter Companies",
+                        options=ui_labels,
+                        key="ui_company_selection",
+                        label_visibility="collapsed"
+                    )
+                st.session_state.tickers = [label.split(" - ")[0].strip() for label in selected_labels]
+                st.success(f"{len(st.session_state.tickers)} companies selected for analysis.")
+                st.checkbox("Replace assets with incomplete/unavailable prices using other companies from this universe",
+                            value=True, key="replace_incomplete_assets",
+                            help="No missing prices are filled. Replacements and exclusions will be listed in the result summary.")
+            else:
+                st.session_state.tickers = []
+                st.warning("The selected universe has no companies. Refresh the database.")
 
 
     else:
@@ -182,33 +198,33 @@ elif st.session_state.step == 2:
 
     num_companies = len(st.session_state.get("tickers", []))
 
-    if num_companies >= 3:
-        # Reset a stale selection if the portfolio has changed.
-        previous_k = st.session_state.get("k_target")
-        if previous_k is not None and not (3 <= previous_k <= num_companies):
-            st.session_state.pop("k_target", None)
-
-        default_k = min(max(3, num_companies // 2), num_companies)
-
-    else:
-        # No valid threshold exists for a portfolio with fewer than 3 assets.
+    if num_companies < 3:
+        # Do not construct a slider with an invalid range for N < 3.
         st.session_state.pop("k_target", None)
         st.warning(
-            "Select at least 3 companies before running the physics engine."
+            f"Currently selected: {num_companies} companies. Return to Step 1 and select at least 3 companies before running the physics engine."
+        )
+    elif num_companies == 3:
+        # Streamlit sliders require min_value < max_value.
+        st.session_state["k_target"] = 3
+        st.info("With N = 3 selected companies, the threshold is fixed at k = 3.")
+    else:
+        previous_k = st.session_state.get("k_target")
+        if previous_k is None or not (3 <= previous_k <= num_companies):
+            st.session_state["k_target"] = min(max(3, num_companies // 2), num_companies)
+
+        st.slider(
+            f"How many companies out of {num_companies} must default to trigger a 'Systemic Crash' (k)?",
+            min_value=3,
+            max_value=num_companies,
+            key="k_target",
+            help="Defines the threshold k used by the mathematical model; this is a modeling choice, not a validated real-world crash label."
         )
 
-    st.slider(
-        f"How many companies out of {num_companies} must default to trigger a 'Systemic Crash' (k)?",
-        min_value=3,
-        max_value=max(3, num_companies),
-        value=max(3, num_companies // 2),
-        key="k_target",
-        help="Defines how many simultaneous failures constitute a 'market crash'."
-    )
-
-    st.info(
-        f"**What this means:** You are asking the engine to calculate the probability that at least {st.session_state.k_target} out of the {num_companies} selected companies will crash at the exact same time."
-    )
+    if num_companies >= 3:
+        st.info(
+            f"**Model definition:** The threshold is k={st.session_state.k_target} out of the currently selected N={num_companies} assets. This is the model's systemic-event definition, not evidence that these companies will literally default at the same time."
+        )
 
     total_needed = st.session_state.K_prior + st.session_state.K + 1
     st.caption(
@@ -240,16 +256,28 @@ elif st.session_state.step == 3:
             if st.session_state.data_source == "Live Market Data (yfinance)":
                 st.write("Fetching historical market data...")
 
-                raw_df = provider.get_sliced_portfolio(
+                required_rows = int(st.session_state.K_prior) + int(st.session_state.K) + 1
+                raw_df, data_report = provider.get_sliced_portfolio(
                     all_tickers=st.session_state.all_dataset_tickers,
                     selected_tickers=st.session_state.tickers,
                     end_date=st.session_state.target_date,
-                    interval=st.session_state.frequency
+                    interval=st.session_state.frequency,
+                    required_rows=required_rows,
+                    replace_incomplete=st.session_state.get("replace_incomplete_assets", True),
                 )
+                st.session_state.data_report = data_report
 
             else:
                 st.write("Processing custom uploaded portfolio data...")
                 raw_df = st.session_state.custom_df.copy()
+                data_report = {
+                    "requested_count": raw_df.shape[1], "final_count": raw_df.shape[1],
+                    "requested_tickers": list(raw_df.columns), "final_tickers": list(raw_df.columns),
+                    "removed": [], "replacements": [], "shortfall": 0,
+                    "observations": len(raw_df), "provider": "User-uploaded CSV",
+                    "note": "CSV data supplied by the user; no market-universe membership metadata."
+                }
+                st.session_state.data_report = data_report
 
             st.write(
                 f"Structuring Matrix: {raw_df.shape[0]} periods × {raw_df.shape[1]} assets..."
@@ -265,9 +293,14 @@ elif st.session_state.step == 3:
             if K < 1 or K_prior < 1:
                 raise ValueError("Both time windows must be at least 1 step.")
 
+            if raw_df.shape[1] < 3:
+                raise ValueError(
+                    f"Only {raw_df.shape[1]} usable assets remain after data validation/replacement. At least 3 are required."
+                )
             if k_target is None or not (3 <= k_target <= raw_df.shape[1]):
                 raise ValueError(
-                    "The crash threshold must be between 3 and the number of selected assets."
+                    f"Crash threshold k={k_target} is invalid for the final portfolio size N={raw_df.shape[1]}. "
+                    "Go back and select a valid threshold for the usable portfolio."
                 )
 
             P_prior, P, N = ma.df_to_math_inputs(raw_df, K_prior, K)
@@ -281,21 +314,14 @@ elif st.session_state.step == 3:
             status.update(label="Engine Execution Complete!", state="complete", expanded=False)
             simulation_success = True
 
-
+        except provider.InsufficientHistoricalDataError as e:
+            st.warning(str(e))
+            status.update(label="Insufficient historical data", state="error", expanded=False)
         except Exception as e:
             st.error(f"Error running pipeline: {e}")
-
-            if isinstance(e, ValueError):
-                st.info(
-                    "Check the input data, selected assets, parameters, "
-                    "and available historical data."
-                )
-
-            status.update(
-                label="Execution Failed",
-                state="error",
-                expanded=False,
-            )
+            if isinstance(e, provider.NoMarketDataError):
+                st.info("No rows were returned. Check the selected date range and whether the provider supports this interval for that period.")
+            status.update(label="Execution Failed", state="error", expanded=False)
 
     # ==========================================
     # OUTPUT LAYOUT
@@ -317,6 +343,18 @@ elif st.session_state.step == 3:
         sum_col4.metric("Data Frequency", st.session_state.frequency)
         sum_col5.metric("Prior Drift Window", f"{st.session_state.K_prior} steps")
         sum_col6.metric("Active Sim Window", f"{st.session_state.K} steps")
+
+        report = st.session_state.get("data_report", {})
+        with st.expander("Data quality and portfolio changes", expanded=bool(report.get("removed") or report.get("replacements"))):
+            st.write(f"Requested assets: **{report.get('requested_count', N)}** · Final usable assets: **{report.get('final_count', N)}** · Complete observations: **{report.get('observations', raw_df.shape[0])}**")
+            st.caption(report.get("note", ""))
+            if report.get("replacements"):
+                st.write("**Replacement assets added:** " + ", ".join(report["replacements"]))
+            if report.get("removed"):
+                st.write("**Assets/candidates excluded:**")
+                st.dataframe(pd.DataFrame(report["removed"]), use_container_width=True, hide_index=True)
+            if report.get("shortfall", 0):
+                st.warning(f"Could not fill the requested portfolio: shortfall of {report['shortfall']} asset(s). The displayed N is the actual usable count.")
 
         st.markdown("---")
 
@@ -340,7 +378,7 @@ elif st.session_state.step == 3:
 
 
         st.info(
-            f"### Probability of $\ge {k_target}$ simultaneous crashes: \n"
+            f"### Probability of $\\ge {k_target}$ simultaneous crashes: \n"
             f"# **{crash_prob_pct:.4f} %**"
         )
 
