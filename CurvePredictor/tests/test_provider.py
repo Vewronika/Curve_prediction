@@ -1,4 +1,5 @@
 import unittest
+import io
 import sys
 import types
 from unittest.mock import Mock, call, patch
@@ -12,11 +13,18 @@ from data_acess.provider import (
     assess_price_matrix,
     fetch_stock_data,
     get_sliced_portfolio,
+    parse_uploaded_csv,
     validate_dataframe,
 )
 
 
 class ValidateDataFrameTests(unittest.TestCase):
+    def test_header_only_uploaded_csv_is_rejected(self):
+        csv_file = io.StringIO("date,AAA,BBB\n")
+
+        with self.assertRaisesRegex(ValueError, "uploaded CSV is empty"):
+            parse_uploaded_csv(csv_file)
+
     def test_valid_wide_csv_is_normalized(self):
         frame = pd.DataFrame({"date": ["2026-01-01", "2026-01-02"], "AAA": [10, 11], "BBB": [20, 21]})
         result = validate_dataframe(frame)
@@ -32,6 +40,30 @@ class ValidateDataFrameTests(unittest.TestCase):
     def test_non_positive_prices_are_rejected(self):
         frame = pd.DataFrame({"date": ["2026-01-01"], "AAA": [0]})
         with self.assertRaisesRegex(ValueError, "zero or negative"):
+            validate_dataframe(frame)
+
+    def test_zero_byte_csv_becomes_a_clear_value_error(self):
+        with self.assertRaisesRegex(ValueError, "Could not read the CSV file"):
+            parse_uploaded_csv(io.StringIO(""))
+
+    def test_duplicate_dates_are_rejected(self):
+        frame = pd.DataFrame({"date": ["2026-01-01", "2026-01-01"], "AAA": [10, 11]})
+        with self.assertRaisesRegex(ValueError, "duplicate dates"):
+            validate_dataframe(frame)
+
+    def test_dates_must_be_chronological(self):
+        frame = pd.DataFrame({"date": ["2026-01-02", "2026-01-01"], "AAA": [10, 11]})
+        with self.assertRaisesRegex(ValueError, "chronological order"):
+            validate_dataframe(frame)
+
+    def test_duplicate_headers_after_trimming_are_rejected(self):
+        frame = pd.DataFrame([["2026-01-01", 10, 20]], columns=["date", "AAA", " AAA "])
+        with self.assertRaisesRegex(ValueError, "must be unique after trimming"):
+            validate_dataframe(frame)
+
+    def test_infinite_prices_are_rejected(self):
+        frame = pd.DataFrame({"date": ["2026-01-01"], "AAA": [np.inf]})
+        with self.assertRaisesRegex(ValueError, "missing or non-numeric"):
             validate_dataframe(frame)
 
 

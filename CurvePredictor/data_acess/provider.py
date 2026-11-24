@@ -71,7 +71,7 @@ def validate_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def parse_uploaded_csv(csv_file) -> pd.DataFrame:
     try:
         frame = pd.read_csv(csv_file)
-    except (pd.errors.ParserError, UnicodeDecodeError) as exc:
+    except (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError) as exc:
         raise ValueError(f"Could not read the CSV file: {exc}") from exc
     if frame.empty:
         raise ValueError("The uploaded CSV is empty.")
