@@ -5,7 +5,7 @@ import plotly.express as px
 import pandas as pd
 from data_acess.provider import parse_uploaded_csv
 from data_acess.db_utils import fetch_all_dataset_names, fetch_companies_by_dataset
-from application.pipeline import run_prediction
+from application.pipeline import InsufficientObservationsError, run_prediction
 
 st.set_page_config(page_title="Predictor Engine", page_icon="📊", layout="wide")
 
@@ -303,7 +303,7 @@ elif st.session_state.step == 3:
             status.update(label="Engine Execution Complete!", state="complete", expanded=False)
             simulation_success = True
 
-        except provider.InsufficientHistoricalDataError as e:
+        except (provider.InsufficientHistoricalDataError, InsufficientObservationsError) as e:
             st.warning(str(e))
             status.update(label="Insufficient historical data", state="error", expanded=False)
         except Exception as e:

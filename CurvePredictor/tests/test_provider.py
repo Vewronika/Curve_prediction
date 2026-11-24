@@ -1,7 +1,7 @@
 import unittest
 import sys
 import types
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 import numpy as np
 import pandas as pd
 
@@ -91,6 +91,64 @@ class HistoricalWindowTests(unittest.TestCase):
         self.assertEqual(download.call_args.kwargs["interval"], "1h")
         self.assertEqual(download.call_args.kwargs["start"], "2024-11-25")
         self.assertEqual(download.call_args.kwargs["end"], "2026-11-24")
+
+
+class PortfolioAssemblyTests(unittest.TestCase):
+    def test_replaces_unavailable_asset_and_reports_final_portfolio(self):
+        index = pd.date_range("2026-01-01", periods=3, freq="D")
+        initial = pd.DataFrame(
+            {"AAA": [10.0, 11.0, 12.0], "BBB": [20.0, 21.0, 22.0], "BAD": [np.nan] * 3},
+            index=index,
+        )
+        candidate = pd.DataFrame({"DDD": [30.0, 31.0, 32.0]}, index=index)
+        final = pd.DataFrame(
+            {"AAA": [10.0, 11.0, 12.0], "BBB": [20.0, 21.0, 22.0], "DDD": [30.0, 31.0, 32.0]},
+            index=index,
+        )
+
+        with patch(
+            "data_acess.provider.fetch_stock_data",
+            side_effect=[initial, candidate, final],
+        ) as fetch:
+            prices, report = get_sliced_portfolio(
+                all_tickers=["AAA", "BBB", "BAD", "DDD"],
+                selected_tickers=["AAA", "BBB", "BAD"],
+                end_date="2026-01-03",
+                interval="1d",
+                required_rows=3,
+            )
+
+        self.assertEqual(list(prices.columns), ["AAA", "BBB", "DDD"])
+        self.assertEqual(report["replacements"], ["DDD"])
+        self.assertEqual(report["observations"], 3)
+        fetch.assert_has_calls([
+            call(["AAA", "BBB", "BAD"], "2026-01-03", "1d", 3),
+            call(["DDD"], "2026-01-03", "1d", 3),
+            call(["AAA", "BBB", "DDD"], "2026-01-03", "1d", 3),
+        ])
+
+    def test_final_alignment_reports_insufficient_complete_rows(self):
+        index = pd.date_range("2026-01-01", periods=4, freq="D")
+        initial = pd.DataFrame(
+            {"AAA": [10.0, 11.0, 12.0, 13.0], "BBB": [20.0, 21.0, 22.0, 23.0], "CCC": [30.0, 31.0, 32.0, 33.0]},
+            index=index,
+        )
+        final = initial.copy()
+        final.loc[index[1], "BBB"] = np.nan
+
+        with patch("data_acess.provider.fetch_stock_data", side_effect=[initial, final]):
+            with self.assertRaisesRegex(
+                InsufficientHistoricalDataError,
+                r"requested 4 observations, but only 3 complete observations",
+            ):
+                get_sliced_portfolio(
+                    all_tickers=["AAA", "BBB", "CCC"],
+                    selected_tickers=["AAA", "BBB", "CCC"],
+                    end_date="2026-01-04",
+                    interval="1d",
+                    required_rows=4,
+                    replace_incomplete=False,
+                )
 
 
 if __name__ == "__main__":

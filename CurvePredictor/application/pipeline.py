@@ -10,6 +10,10 @@ from data_acess import math_adapter, provider
 from method import algorithm
 
 
+class InsufficientObservationsError(ValueError):
+    """Raised when an input dataset is shorter than the configured windows."""
+
+
 @dataclass
 class PredictionRun:
     """Inputs and outputs needed by the UI to present a completed run."""
@@ -44,8 +48,8 @@ def run_prediction(
     page only gathers inputs and renders the returned data; this function owns
     the run's orchestration and validation.
     """
-    k_prior = int(k_prior)
-    k = int(k)
+    k_prior = _window_steps("K_prior", k_prior)
+    k = _window_steps("K", k)
     if k_prior < 1 or k < 1:
         raise ValueError("Both time windows must be at least 1 step.")
     required_rows = k_prior + k + 1
@@ -83,15 +87,38 @@ def run_prediction(
     else:
         raise ValueError(f"Unsupported data mode: {data_mode}")
 
+    available_rows = len(prices.dropna(axis=0, how="any"))
+    if available_rows < required_rows:
+        if data_mode == "market":
+            raise provider.InsufficientHistoricalDataError(
+                f"Insufficient historical data: requested {required_rows} observations, "
+                f"but only {available_rows} complete observations are available "
+                f"for interval '{interval}'."
+            )
+        raise InsufficientObservationsError(
+            f"Insufficient CSV data: requested {required_rows} observations, "
+            f"but only {available_rows} complete observations are available."
+        )
+
     if prices.shape[1] < 3:
         raise ValueError(
             f"Only {prices.shape[1]} usable assets are available. At least 3 are required."
         )
-    if k_target is None or not (3 <= k_target <= prices.shape[1]):
+    try:
+        integer_k_target = int(k_target)
+    except (TypeError, ValueError, OverflowError):
+        integer_k_target = None
+    if (
+        isinstance(k_target, bool)
+        or integer_k_target is None
+        or integer_k_target != k_target
+        or not (3 <= integer_k_target <= prices.shape[1])
+    ):
         raise ValueError(
             f"Crash threshold k={k_target} is invalid for the final portfolio size "
             f"N={prices.shape[1]}. Choose a threshold from 3 to N."
         )
+    k_target = integer_k_target
 
     prior_inputs, active_inputs, asset_count = math_adapter.df_to_math_inputs(
         prices, k_prior, k
@@ -111,3 +138,14 @@ def run_prediction(
         k=k,
         k_target=k_target,
     )
+
+
+def _window_steps(name: str, value: int) -> int:
+    """Accept integer step counts without silently truncating decimal inputs."""
+    try:
+        steps = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a whole number of steps.") from exc
+    if isinstance(value, bool) or steps != value:
+        raise ValueError(f"{name} must be a whole number of steps.")
+    return steps
