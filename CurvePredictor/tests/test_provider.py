@@ -88,6 +88,116 @@ class AssessPriceMatrixTests(unittest.TestCase):
 
 
 class HistoricalWindowTests(unittest.TestCase):
+
+    def test_fetch_stock_data_orders_tickers_and_dates(self):
+        dates = pd.to_datetime(["2026-01-02", "2026-01-01"])
+        columns = pd.MultiIndex.from_tuples([
+            ("Close", "BBB"),
+            ("Close", "AAA"),
+        ])
+        downloaded = pd.DataFrame(
+            [[21.0, 11.0], [20.0, 10.0]],
+            index=dates,
+            columns=columns,
+        )
+
+        download = Mock(return_value=downloaded)
+        fake_yfinance = types.SimpleNamespace(download=download)
+
+        # Avoid a cached result bypassing the mocked yfinance call.
+        fetch_stock_data.clear()
+        self.addCleanup(fetch_stock_data.clear)
+        with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
+            prices = fetch_stock_data(
+                ["AAA", "BBB"],
+                "2026-01-02",
+                interval="1d",
+                required_rows=2,
+            )
+
+        self.assertEqual(list(prices.columns), ["AAA", "BBB"])
+        self.assertEqual(
+            list(prices.index),
+            list(pd.to_datetime(["2026-01-01", "2026-01-02"])),
+        )
+        self.assertEqual(prices.loc[pd.Timestamp("2026-01-01"), "AAA"], 10.0)
+        self.assertEqual(prices.loc[pd.Timestamp("2026-01-01"), "BBB"], 20.0)
+        download.assert_called_once()
+        self.assertEqual(download.call_args.kwargs["tickers"], ["AAA", "BBB"])
+
+    def test_fetch_stock_data_keeps_last_duplicate_timestamp(self):
+        dates = pd.to_datetime(["2026-01-01", "2026-01-01", "2026-01-02"])
+        columns = pd.MultiIndex.from_tuples([
+            ("Close", "AAA"),
+            ("Close", "BBB"),
+        ])
+        downloaded = pd.DataFrame(
+            [[10.0, 20.0], [10.5, 20.5], [11.0, 21.0]],
+            index=dates,
+            columns=columns,
+        )
+
+        download = Mock(return_value=downloaded)
+        fake_yfinance = types.SimpleNamespace(download=download)
+        fetch_stock_data.clear()
+        self.addCleanup(fetch_stock_data.clear)
+
+        with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
+            prices = fetch_stock_data(
+                ["AAA", "BBB"],
+                "2026-01-02",
+                interval="1d",
+                required_rows=3,
+            )
+
+        duplicate_date = pd.Timestamp("2026-01-01")
+        self.assertEqual(len(prices), 2)
+        self.assertFalse(prices.index.duplicated().any())
+        self.assertEqual(prices.loc[duplicate_date, "AAA"], 10.5)
+        self.assertEqual(prices.loc[duplicate_date, "BBB"], 20.5)
+
+    def test_fetch_single_ticker_renames_flat_close_column(self):
+        index = pd.to_datetime(["2026-01-01", "2026-01-02"])
+        downloaded = pd.DataFrame({"Close": [10.0, 11.0]}, index=index)
+        download = Mock(return_value=downloaded)
+        fake_yfinance = types.SimpleNamespace(download=download)
+        fetch_stock_data.clear()
+        self.addCleanup(fetch_stock_data.clear)
+
+        with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
+            prices = fetch_stock_data(
+                ["AAA"],
+                "2026-01-02",
+                interval="1d",
+                required_rows=2,
+            )
+
+        self.assertEqual(list(prices.columns), ["AAA"])
+        self.assertEqual(prices["AAA"].tolist(), [10.0, 11.0])
+        self.assertEqual(download.call_args.kwargs["tickers"], ["AAA"])
+
+    def test_fetch_rejects_response_without_closing_price_field(self):
+        index = pd.to_datetime(["2026-01-01"])
+        columns = pd.MultiIndex.from_tuples([
+            ("Open", "AAA"),
+            ("Open", "BBB"),
+        ])
+        downloaded = pd.DataFrame([[10.0, 20.0]], index=index, columns=columns)
+        download = Mock(return_value=downloaded)
+        fake_yfinance = types.SimpleNamespace(download=download)
+        fetch_stock_data.clear()
+        self.addCleanup(fetch_stock_data.clear)
+
+        with patch.dict(sys.modules, {"yfinance": fake_yfinance}):
+            with self.assertRaisesRegex(ValueError, "no closing-price field"):
+                fetch_stock_data(
+                    ["AAA", "BBB"],
+                    "2026-01-01",
+                    interval="1d",
+                    required_rows=1,
+                )
+
+
     def test_large_hourly_window_is_bounded_below_provider_limit(self):
         self.assertEqual(_period_days("1h", 10001), 728)
 
