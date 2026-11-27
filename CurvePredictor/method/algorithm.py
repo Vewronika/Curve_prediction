@@ -16,14 +16,14 @@ def run_algorithm(P_prior, P, N, K_prior, K, k_target):
         initial_prior_price = P_prior[i][0]
         final_prior_price = P_prior[i][K_prior]
         total_prior_log_return = math.log(final_prior_price / initial_prior_price)
-        mu_hat[i] = total_prior_log_return / K_prior
+    mu_hat[i] = total_prior_log_return / K_prior if K_prior > 0 else 0.0
 
     # 1.2 Cumulative log-returns in active window: Y_i(t_m) = log(P_i(t_m) / P_i(0))
     Y = [[0.0 for m in range(K + 1)] for i in range(N)]
     for i in range(N):
         initial_price = P[i][0]
         for m in range(K + 1):
-            Y[i][m] = math.log(P[i][m] / initial_price)
+            Y[i][m] = math.log(P[i][m] / initial_price) if initial_price > 0 else 0.0
 
     # 1.3 Remove prior linear drift to construct centered trajectories omega_i(t_m)
     # Formula: omega_i(t_m) = Y_i(t_m) - m * mu_hat_i
@@ -75,8 +75,8 @@ def run_algorithm(P_prior, P, N, K_prior, K, k_target):
 
     H_real = avg_individual_loss + 0.5 * avg_pairwise_interaction
 
-    print(f"Estimated per-step drifts mu_hat: {[round(x, 5) for x in mu_hat]}")
-    print(f"Stage 1 -> sigma_0: {sigma_0:.6f}, H_real: {H_real:.6f}")
+    print(f"Estimated per-step drifts mu_hat: {[round(x, 5) for x in mu_hat]}") 
+    print(f"Stage 1 -> sigma_0: {sigma_0:.6f}, H_real: {H_real:.6f}")  
 
     S = 200  # Number of synthetic Monte Carlo paths
     random.seed(42)  # Fixed seed for reproducibility
@@ -115,25 +115,25 @@ def run_algorithm(P_prior, P, N, K_prior, K, k_target):
             W[s][r] = value
             W[r][s] = value
 
-    print(f"Stage 2 -> Generated {S} paths. Defaulted synthetic paths: {int(sum(d))}/{S}")
+    print(f"Stage 2 -> Generated {S} paths. Defaulted synthetic paths: {int(sum(d))}/{S}")  
 
     beta_star, w_star = find_beta_star(H_real, L, W)
     E_check, _ = solve_weights_and_energy(beta_star, L, W)
 
-    print(f"Stage 3 -> Calibrated beta*: {beta_star:.6f}")
-    print(f"Stage 3 -> Energy check E(beta*): {E_check:.6f} vs H_real: {H_real:.6f}")
+    print(f"Stage 3 -> Calibrated beta*: {beta_star:.6f}")  
+    print(f"Stage 3 -> Energy check E(beta*): {E_check:.6f} vs H_real: {H_real:.6f}") 
 
     k_target = 3  # at least 3
     result = predict_systemic_crash(k_target, N, w_star, d, L, W, beta_star)
 
-    print("\n--- STAGE 4 FINAL RESULTS ---")
-    print(f"Single-stock equilibrium default prob (p*): {result['p_star']:.6f}")
-    print(f"Target crash fraction (q = k/N):            {result['q']:.6f}")
-    print(f"Rate function I*(q):                        {result['I_q']:.6f}")
-    print(f"Exponent N * I*(q):                         {result['exponent']:.6f}")
-    print(f"Underflow flag (>= 700):                    {result['underflow_flag']}")
-    print(f"Crash Probability P_N(Crash_{{k,N}}):         {result['crash_probability']:.6e}")
-    print(f"Log Crash Probability:                      {result['log_crash_probability']:.6f}")
+    print("\n--- STAGE 4 FINAL RESULTS ---")  
+    print(f"Single-stock equilibrium default prob (p*): {result['p_star']:.6f}") 
+    print(f"Target crash fraction (q = k/N):            {result['q']:.6f}")  
+    print(f"Rate function I*(q):                        {result['I_q']:.6f}")  
+    print(f"Exponent N * I*(q):                         {result['exponent']:.6f}") 
+    print(f"Underflow flag (>= 700):                    {result['underflow_flag']}")  
+    print(f"Crash Probability P_N(Crash_{{k,N}}):         {result['crash_probability']:.6e}")  
+    print(f"Log Crash Probability:                      {result['log_crash_probability']:.6f}")  
 
 
 
@@ -395,3 +395,174 @@ def predict_systemic_crash(k, N, w_star, d, L, W, beta_star):
         "log_crash_probability": log_crash_prob,
     }
 
+
+def run_algorithm_mode2(P_prior, P, N, K_prior, K, k_target):
+    T = 1.0
+    dt = T / K
+    B = -0.10
+    alpha = 1.0
+    gamma = 0.5
+
+    # 1.1 Estimate per-step drift mu_hat[i] from the prior window
+    # Formula: mu_hat_i = (1 / K_prior) * log( P_prior_i(K_prior) / P_prior_i(0) )
+    mu_hat = [0.0 for i in range(N)]
+    for i in range(N):
+        initial_prior_price = P_prior[i][0]
+        final_prior_price = P_prior[i][K_prior]
+        total_prior_log_return = math.log(final_prior_price / initial_prior_price)
+        mu_hat[i] = total_prior_log_return / K_prior if K_prior > 0 else 0.0
+
+    # 1.2 Cumulative log-returns in active window: Y_i(t_m) = log(P_i(t_m) / P_i(0))
+    Y = [[0.0 for m in range(K + 1)] for i in range(N)]
+    for i in range(N):
+        initial_price = P[i][0]
+        for m in range(K + 1):
+            Y[i][m] = math.log(P[i][m] / initial_price) if initial_price > 0 else 0.0
+
+    # 1.3 Remove prior linear drift to construct centered trajectories omega_i(t_m)
+    # Formula: omega_i(t_m) = Y_i(t_m) - m * mu_hat_i
+    omega = [[0.0 for m in range(K + 1)] for i in range(N)]
+    for i in range(N):
+        for m in range(K + 1):
+            omega[i][m] = Y[i][m] - (m * mu_hat[i])
+
+    # 1.4 Time increments: d_omega_i(t_m) = omega_i(t_m) - omega_i(t_{m-1})
+    d_omega = [[0.0 for m in range(K + 1)] for i in range(N)]
+    for i in range(N):
+        for m in range(1, K + 1):
+            d_omega[i][m] = omega[i][m] - omega[i][m - 1]
+
+    # 1.5 Idiosyncratic residuals: subtract cross-sectional average of increments at each step m
+    epsilon = [[0.0 for m in range(K + 1)] for i in range(N)]
+    for m in range(1, K + 1):
+        sum_across_stocks = 0.0
+        for j in range(N):
+            sum_across_stocks += d_omega[j][m]
+        market_average = sum_across_stocks / N
+
+        for i in range(N):
+            epsilon[i][m] = d_omega[i][m] - market_average
+
+    # 1.6 Calibrate individual baseline volatilities sigma_hat[i] via MLE & standardize paths
+    sigma_hat = [0.0 for i in range(N)]
+    for i in range(N):
+        sum_squared_epsilon_i = 0.0
+        for m in range(1, K + 1):
+            sum_squared_epsilon_i += epsilon[i][m] ** 2
+        sigma_hat[i] = max(math.sqrt(sum_squared_epsilon_i / (K * dt)), 1e-8)
+
+    sigma_avg = sum(sigma_hat) / N
+    B_tilde = B / sigma_avg
+
+    for i in range(N):
+        for m in range(K + 1):
+            omega[i][m] = omega[i][m] / sigma_hat[i]
+
+    # 1.6b Compute prior regime statistics (D_prior, rho_prior_plus) for Mode 2 functionals
+    alpha_eff = alpha
+    gamma_eff = gamma
+    if K_prior > 0:
+        xi_prior = [[0.0 for k in range(K_prior + 1)] for i in range(N)]
+        for i in range(N):
+            init_p = P_prior[i][0]
+            for k in range(K_prior + 1):
+                y_p = math.log(P_prior[i][k] / init_p) if init_p > 0 else 0.0
+                xi_prior[i][k] = (y_p - k * mu_hat[i]) / sigma_hat[i]
+
+        D_prior = sum(1.0 for i in range(N) if min(xi_prior[i]) <= B_tilde) / N
+
+        sum_corr = 0.0
+        pairs = 0
+        for i in range(N):
+            di = [xi_prior[i][k] - xi_prior[i][k - 1] for k in range(1, K_prior + 1)]
+            mi = sum(di) / K_prior
+            for j in range(i + 1, N):
+                dj = [xi_prior[j][k] - xi_prior[j][k - 1] for k in range(1, K_prior + 1)]
+                mj = sum(dj) / K_prior
+                cov = sum((di[k] - mi) * (dj[k] - mj) for k in range(K_prior))
+                den = math.sqrt(sum((di[k] - mi) ** 2 for k in range(K_prior)) *
+                                sum((dj[k] - mj) ** 2 for k in range(K_prior)))
+                sum_corr += (cov / den) if den > 1e-12 else 0.0
+                pairs += 1
+        rho_prior_plus = max(0.0, sum_corr / pairs) if pairs > 0 else 0.0
+
+        alpha_eff = alpha * (1.0 + D_prior)
+        gamma_eff = gamma * (1.0 + rho_prior_plus)
+
+    # 1.7 Compute realized intensive energy H_real on standardized paths
+    sum_individual_losses = 0.0
+    for i in range(N):
+        if min(omega[i]) <= B_tilde:
+            sum_individual_losses += alpha_eff
+    avg_individual_loss = sum_individual_losses / N
+
+    sum_pairwise_interactions = 0.0
+    for i in range(N):
+        for j in range(N):
+            integral_ij = 0.0
+            for m in range(1, K + 1):
+                integral_ij += omega[i][m] * omega[j][m] * dt
+            sum_pairwise_interactions += gamma_eff * integral_ij
+    avg_pairwise_interaction = sum_pairwise_interactions / (N ** 2)
+
+    H_real = avg_individual_loss + 0.5 * avg_pairwise_interaction
+
+    print(f"Estimated per-step drifts mu_hat: {[round(x, 5) for x in mu_hat]}")
+    print(f"Stage 1 (Mode 2) -> sigma_hat: {[round(x, 5) for x in sigma_hat]}, B_tilde: {B_tilde:.4f}")
+    print(f"Stage 1 (Mode 2) -> alpha_eff: {alpha_eff:.4f}, gamma_eff: {gamma_eff:.4f}, H_real: {H_real:.6f}")
+
+    S = 200  # Number of synthetic Monte Carlo paths
+    random.seed(42)  # Fixed seed for reproducibility
+
+    # 2.1 Generate S unit-variance standard Brownian motion paths omega_tilde[s][m] (sigma_0 = 1.0)
+    omega_tilde = [[0.0 for m in range(K + 1)] for s in range(S)]
+    step_std = 1.0 * math.sqrt(dt)
+
+    for s in range(S):
+        omega_tilde[s][0] = 0.0
+        for m in range(1, K + 1):
+            z = random.gauss(0.0, 1.0)
+            omega_tilde[s][m] = omega_tilde[s][m - 1] + step_std * z
+
+    # 2.2 Compute synthetic individual loss vector L (length S) and default indicator d
+    L = [0.0 for s in range(S)]
+    d = [0.0 for s in range(S)]
+
+    for s in range(S):
+        if min(omega_tilde[s]) <= B_tilde:
+            L[s] = alpha_eff
+            d[s] = 1.0
+        else:
+            L[s] = 0.0
+            d[s] = 0.0
+
+    # 2.3 Compute synthetic pairwise interaction matrix W (size S x S)
+    W = [[0.0 for r in range(S)] for s in range(S)]
+
+    for s in range(S):
+        for r in range(s, S):
+            integral_sr = 0.0
+            for m in range(1, K + 1):
+                integral_sr += omega_tilde[s][m] * omega_tilde[r][m] * dt
+            value = gamma_eff * integral_sr
+            W[s][r] = value
+            W[r][s] = value
+
+    print(f"Stage 2 (Mode 2) -> Generated {S} paths. Defaulted synthetic paths: {int(sum(d))}/{S}")
+
+    beta_star, w_star = find_beta_star(H_real, L, W)
+    E_check, _ = solve_weights_and_energy(beta_star, L, W)
+
+    print(f"Stage 3 (Mode 2) -> Calibrated beta*: {beta_star:.6f}")
+    print(f"Stage 3 (Mode 2) -> Energy check E(beta*): {E_check:.6f} vs H_real: {H_real:.6f}")
+
+    result = predict_systemic_crash(k_target, N, w_star, d, L, W, beta_star)
+
+    print("\n--- STAGE 4 (MODE 2) FINAL RESULTS ---")
+    print(f"Single-stock equilibrium default prob (p*): {result['p_star']:.6f}")
+    print(f"Target crash fraction (q = k/N):            {result['q']:.6f}")
+    print(f"Rate function I*(q):                        {result['I_q']:.6f}")
+    print(f"Exponent N * I*(q):                         {result['exponent']:.6f}")
+    print(f"Underflow flag (>= 700):                    {result['underflow_flag']}")
+    print(f"Crash Probability P_N(Crash_{{k,N}}):         {result['crash_probability']:.6e}")
+    print(f"Log Crash Probability:                      {result['log_crash_probability']:.6f}")
