@@ -3,7 +3,8 @@ from unittest.mock import Mock
 
 import pandas as pd
 
-from application.pipeline import run_prediction
+from application.pipeline import InsufficientObservationsError, run_prediction
+from data_acess.provider import InsufficientHistoricalDataError, NoMarketDataError
 
 
 def sample_prices(rows=6):
@@ -33,13 +34,14 @@ class RunPredictionTests(unittest.TestCase):
         )
 
         self.assertEqual(run.asset_count, 3)
+        self.assertTrue(run.prices.equals(prices))
         self.assertEqual(run.data_report["provider"], "User-uploaded CSV")
         self.assertEqual(run.model_output["crash_probability"], 0.25)
         prior_inputs, active_inputs, asset_count, k_prior, k, k_target = runner.call_args.args
         self.assertEqual(asset_count, 3)
         self.assertEqual((k_prior, k, k_target), (2, 3, 3))
-        self.assertEqual(len(prior_inputs[0]), 3)
-        self.assertEqual(len(active_inputs[0]), 4)
+        self.assertEqual(prior_inputs[0], [10.0, 11.0, 12.0])
+        self.assertEqual(active_inputs[0], [12.0, 13.0, 14.0, 15.0])
 
     def test_market_data_loader_receives_required_window(self):
         prices = sample_prices()
@@ -62,6 +64,96 @@ class RunPredictionTests(unittest.TestCase):
         self.assertEqual(loader.call_args.kwargs["required_rows"], 6)
         self.assertEqual(loader.call_args.kwargs["interval"], "1d")
         runner.assert_called_once()
+
+    def test_short_csv_reports_actual_complete_observations_before_model(self):
+        runner = Mock()
+
+        with self.assertRaisesRegex(
+            InsufficientObservationsError,
+            r"requested 6 observations, but only 5 complete observations",
+        ):
+            run_prediction(
+                data_mode="csv",
+                custom_prices=sample_prices(rows=5),
+                k_prior=2,
+                k=3,
+                k_target=3,
+                model_runner=runner,
+            )
+
+        runner.assert_not_called()
+
+    def test_short_live_history_has_specific_provider_exception(self):
+        loader = Mock(return_value=(sample_prices(rows=5), {"provider": "fixture"}))
+        runner = Mock()
+
+        with self.assertRaisesRegex(
+            InsufficientHistoricalDataError,
+            r"requested 6 observations, but only 5 complete observations.*1d",
+        ):
+            run_prediction(
+                data_mode="market",
+                all_tickers=["AAA", "BBB", "CCC"],
+                selected_tickers=["AAA", "BBB", "CCC"],
+                target_date="2026-01-05",
+                interval="1d",
+                k_prior=2,
+                k=3,
+                k_target=3,
+                market_data_loader=loader,
+                model_runner=runner,
+            )
+
+        runner.assert_not_called()
+
+    def test_empty_market_result_exception_is_preserved(self):
+        loader = Mock(side_effect=NoMarketDataError("no rows for this range"))
+
+        with self.assertRaisesRegex(NoMarketDataError, "no rows for this range"):
+            run_prediction(
+                data_mode="market",
+                all_tickers=["AAA", "BBB", "CCC"],
+                selected_tickers=["AAA", "BBB", "CCC"],
+                target_date="2026-01-06",
+                interval="1d",
+                k_prior=2,
+                k=3,
+                k_target=3,
+                market_data_loader=loader,
+            )
+
+    def test_fractional_window_is_not_silently_truncated(self):
+        loader = Mock()
+
+        with self.assertRaisesRegex(ValueError, "K must be a whole number"):
+            run_prediction(
+                data_mode="market",
+                all_tickers=["AAA", "BBB", "CCC"],
+                selected_tickers=["AAA", "BBB", "CCC"],
+                target_date="2026-01-06",
+                interval="1d",
+                k_prior=2,
+                k=3.5,
+                k_target=3,
+                market_data_loader=loader,
+            )
+
+        loader.assert_not_called()
+
+    def test_invalid_threshold_is_rejected_before_model(self):
+        runner = Mock()
+
+        with self.assertRaisesRegex(ValueError, "Crash threshold k=3.5 is invalid"):
+            run_prediction(
+                data_mode="csv",
+                custom_prices=sample_prices(),
+                k_prior=2,
+                k=3,
+                k_target=3.5,
+                model_runner=runner,
+            )
+
+        runner.assert_not_called()
 
     def test_invalid_portfolio_stops_before_model_runner(self):
         runner = Mock()

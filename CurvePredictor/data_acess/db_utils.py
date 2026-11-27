@@ -1,11 +1,12 @@
 """Read-only helpers for the local universe metadata database."""
+from contextlib import closing
 import sqlite3
 import pandas as pd
 from config import DB_PATH
 
 
 def fetch_all_dataset_names():
-    with sqlite3.connect(DB_PATH) as connection:
+    with closing(sqlite3.connect(DB_PATH)) as connection:
         tables = pd.read_sql_query(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='dataset'", connection
         )
@@ -30,7 +31,7 @@ def fetch_companies_by_dataset(dataset_name):
             cd.company_rank ASC,
             c.ticker ASC
     """
-    with sqlite3.connect(DB_PATH) as connection:
+    with closing(sqlite3.connect(DB_PATH)) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(company_dataset)")}
         # Read older databases safely until setup_db.py is run to migrate them.
         if not {"rank_type", "market_cap_usd", "market_cap_as_of"}.issubset(columns):
