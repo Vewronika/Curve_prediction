@@ -6,8 +6,10 @@ import pandas as pd
 from application.experiment_runner import (
     ExperimentConfig,
     build_k_target_configurations,
+    build_portfolio_size_configurations,
     run_experiment,
     run_k_target_experiment,
+    run_portfolio_size_experiment,
 )
 from application.pipeline import PredictionRun
 
@@ -177,6 +179,146 @@ class KTargetExperimentTests(unittest.TestCase):
         self.assertEqual([threshold for threshold, _ in calls], [3, 4])
         self.assertTrue(calls[0][1].equals(calls[1][1]))
         self.assertIsNot(calls[0][1], calls[1][1])
+
+
+class PortfolioSizeExperimentTests(unittest.TestCase):
+    def test_csv_builder_varies_n_and_holds_k_target_fixed(self):
+        base = sample_config(k_target=3)
+        base.custom_prices["DDD"] = [40.0, 41.0]
+        base.custom_prices["EEE"] = [50.0, 51.0]
+
+        configurations = build_portfolio_size_configurations(base, [3, 4, 5])
+
+        self.assertEqual([config.custom_prices.shape[1] for config in configurations], [3, 4, 5])
+        self.assertEqual([config.k_target for config in configurations], [3, 3, 3])
+        self.assertEqual([config.k for config in configurations], [base.k] * 3)
+        self.assertEqual([config.k_prior for config in configurations], [base.k_prior] * 3)
+        self.assertEqual(
+            [list(config.custom_prices.columns) for config in configurations],
+            [list(base.custom_prices.columns[:size]) for size in [3, 4, 5]],
+        )
+
+    def test_market_builder_uses_nested_selected_tickers_and_same_universe(self):
+        base = ExperimentConfig(
+            data_mode="market",
+            k_prior=2,
+            k=4,
+            k_target=3,
+            all_tickers=["AAA", "BBB", "CCC", "DDD", "EEE"],
+            selected_tickers=["AAA", "BBB", "CCC", "DDD"],
+            target_date="2026-01-06",
+            interval="1d",
+        )
+
+        configurations = build_portfolio_size_configurations(base, [3, 4])
+
+        self.assertEqual(
+            [config.selected_tickers for config in configurations],
+            [["AAA", "BBB", "CCC"], ["AAA", "BBB", "CCC", "DDD"]],
+        )
+        self.assertEqual(configurations[0].all_tickers, configurations[1].all_tickers)
+        self.assertEqual([config.k_target for config in configurations], [3, 3])
+
+    def test_builder_rejects_sizes_that_cannot_use_fixed_k_target(self):
+        base = sample_config(k_target=4)
+
+        with self.assertRaisesRegex(ValueError, "at least as large as k_target"):
+            build_portfolio_size_configurations(base, [3, 4])
+
+    def test_runner_executes_each_portfolio_size(self):
+        base = sample_config(k_target=3)
+        base.custom_prices["DDD"] = [40.0, 41.0]
+        runner = Mock(
+            side_effect=[sample_prediction(k_target=3), sample_prediction(k_target=3)]
+        )
+
+        experiment = run_portfolio_size_experiment(
+            base,
+            [3, 4],
+            prediction_runner=runner,
+        )
+
+        self.assertEqual(experiment.total_runs, 2)
+        self.assertEqual(experiment.successful_runs, 2)
+        self.assertEqual(
+            [call.kwargs["custom_prices"].shape[1] for call in runner.call_args_list],
+            [3, 4],
+        )
+        self.assertEqual([call.kwargs["k_target"] for call in runner.call_args_list], [3, 3])
+
+    def test_live_market_sweep_fetches_largest_portfolio_once_then_slices(self):
+        base = ExperimentConfig(
+            data_mode="market",
+            k_prior=1,
+            k=1,
+            k_target=3,
+            all_tickers=["AAA", "BBB", "CCC", "DDD", "XXX"],
+            selected_tickers=["AAA", "BBB", "CCC", "DDD"],
+            target_date="2026-01-06",
+            interval="1d",
+        )
+        prices = pd.DataFrame(
+            {
+                "AAA": [10.0, 11.0],
+                "CCC": [30.0, 31.0],
+                "DDD": [40.0, 41.0],
+                "XXX": [50.0, 51.0],
+            },
+            index=pd.date_range("2026-01-01", periods=2, freq="D"),
+        )
+        loader = Mock(
+            return_value=(
+                prices,
+                {
+                    "requested_tickers": ["AAA", "BBB", "CCC", "DDD"],
+                    "requested_count": 4,
+                    "final_tickers": ["AAA", "CCC", "DDD", "XXX"],
+                    "final_count": 4,
+                    "removed": [
+                        {"ticker": "BBB", "reason": "missing", "replacement_candidate": False}
+                    ],
+                    "replacements": ["XXX"],
+                    "shortfall": 0,
+                    "observations": 2,
+                    "provider": "fixture",
+                },
+            )
+        )
+        captured = []
+
+        def fake_prediction_runner(**kwargs):
+            sliced_prices, report = kwargs["market_data_loader"](
+                all_tickers=kwargs["all_tickers"],
+                selected_tickers=kwargs["selected_tickers"],
+                end_date=kwargs["target_date"],
+                interval=kwargs["interval"],
+                required_rows=kwargs["k_prior"] + kwargs["k"] + 1,
+                replace_incomplete=kwargs["replace_incomplete"],
+            )
+            captured.append((list(sliced_prices.columns), report))
+            return sample_prediction(k_target=kwargs["k_target"])
+
+        with patch(
+            "application.experiment_runner.run_prediction",
+            side_effect=fake_prediction_runner,
+        ):
+            experiment = run_portfolio_size_experiment(
+                base,
+                [3, 4],
+                market_data_loader=loader,
+            )
+
+        self.assertEqual(experiment.successful_runs, 2)
+        loader.assert_called_once()
+        self.assertEqual(
+            loader.call_args.kwargs["selected_tickers"],
+            ["AAA", "BBB", "CCC", "DDD"],
+        )
+        self.assertEqual(captured[0][0], ["AAA", "CCC", "XXX"])
+        self.assertEqual(captured[1][0], ["AAA", "CCC", "DDD", "XXX"])
+        self.assertEqual(captured[0][1]["requested_count"], 3)
+        self.assertEqual(captured[0][1]["final_count"], 3)
+        self.assertEqual(captured[0][1]["replacements"], ["XXX"])
 
 
 if __name__ == "__main__":

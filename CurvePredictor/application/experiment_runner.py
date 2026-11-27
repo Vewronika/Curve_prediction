@@ -190,3 +190,148 @@ def run_k_target_experiment(
         return run_prediction(**kwargs)
 
     return run_experiment(configurations, prediction_runner=run_with_shared_market_data)
+
+
+def build_portfolio_size_configurations(
+    base_config: ExperimentConfig,
+    portfolio_sizes: Iterable[int],
+) -> list[ExperimentConfig]:
+    """Create nested portfolios of different sizes, keeping k_target fixed."""
+    sizes = list(portfolio_sizes)
+    if not sizes:
+        raise ValueError("Choose at least one portfolio size for the experiment.")
+    if any(
+        isinstance(size, bool)
+        or not isinstance(size, Integral)
+        or size < 3
+        for size in sizes
+    ):
+        raise ValueError("Every portfolio size must be a whole number of at least 3.")
+    if len(set(sizes)) != len(sizes):
+        raise ValueError("Each portfolio size must be unique in the experiment.")
+
+    k_target = base_config.k_target
+    if (
+        isinstance(k_target, bool)
+        or not isinstance(k_target, Integral)
+        or k_target < 3
+    ):
+        raise ValueError("Choose a whole-number k_target of at least 3 before the experiment.")
+    if any(size < k_target for size in sizes):
+        raise ValueError("Every portfolio size must be at least as large as k_target.")
+
+    if base_config.data_mode == "csv":
+        if base_config.custom_prices is None:
+            raise ValueError("Provide CSV price data before choosing portfolio sizes.")
+        max_size = base_config.custom_prices.shape[1]
+        if any(size > max_size for size in sizes):
+            raise ValueError(
+                f"CSV data contains {max_size} assets; portfolio size cannot exceed that count."
+            )
+        return [
+            replace(
+                base_config,
+                custom_prices=base_config.custom_prices.iloc[:, :size].copy(),
+            )
+            for size in sizes
+        ]
+
+    if base_config.data_mode == "market":
+        if base_config.selected_tickers is None:
+            raise ValueError("Select market assets before choosing portfolio sizes.")
+        selected_tickers = list(dict.fromkeys(base_config.selected_tickers))
+        if not selected_tickers:
+            raise ValueError("Select at least one market asset before choosing portfolio sizes.")
+        if any(size > len(selected_tickers) for size in sizes):
+            raise ValueError(
+                f"Only {len(selected_tickers)} assets are selected; portfolio size cannot exceed that count."
+            )
+
+        all_tickers = (
+            list(base_config.all_tickers) if base_config.all_tickers is not None else None
+        )
+        return [
+            replace(
+                base_config,
+                all_tickers=all_tickers,
+                selected_tickers=selected_tickers[:size],
+            )
+            for size in sizes
+        ]
+
+    raise ValueError(f"Unsupported data mode: {base_config.data_mode}")
+
+
+def run_portfolio_size_experiment(
+    base_config: ExperimentConfig,
+    portfolio_sizes: Iterable[int],
+    *,
+    prediction_runner: Callable[..., PredictionRun] | None = None,
+    market_data_loader: Callable[..., tuple[pd.DataFrame, dict]] | None = None,
+) -> ExperimentResult:
+    """Run an N sweep while holding the user-selected k_target fixed."""
+    configurations = build_portfolio_size_configurations(base_config, portfolio_sizes)
+    if base_config.data_mode != "market" or prediction_runner is not None:
+        return run_experiment(configurations, prediction_runner=prediction_runner)
+
+    largest_config = max(configurations, key=lambda config: len(config.selected_tickers))
+    cached_prices: pd.DataFrame | None = None
+    cached_report: dict | None = None
+    market_data_attempted = False
+    market_data_error: Exception | None = None
+
+    def load_shared_portfolio(**kwargs) -> tuple[pd.DataFrame, dict]:
+        nonlocal cached_prices, cached_report, market_data_attempted, market_data_error
+        if not market_data_attempted:
+            market_data_attempted = True
+            loader = market_data_loader or provider.get_sliced_portfolio
+            try:
+                cached_prices, cached_report = loader(
+                    all_tickers=kwargs["all_tickers"],
+                    selected_tickers=largest_config.selected_tickers,
+                    end_date=kwargs["end_date"],
+                    interval=kwargs["interval"],
+                    required_rows=kwargs["required_rows"],
+                    replace_incomplete=kwargs["replace_incomplete"],
+                )
+            except Exception as exc:
+                market_data_error = exc
+
+        if market_data_error is not None:
+            raise market_data_error
+        if cached_prices is None or cached_report is None:
+            raise RuntimeError("Market data loading did not produce a result.")
+
+        requested_tickers = list(kwargs["selected_tickers"])
+        eligible_selected = [
+            ticker for ticker in requested_tickers if ticker in cached_prices.columns
+        ]
+        replacements = [
+            ticker
+            for ticker in cached_report.get("replacements", [])
+            if ticker in cached_prices.columns
+        ]
+        tickers = eligible_selected + replacements[: len(requested_tickers) - len(eligible_selected)]
+        prices = cached_prices.loc[:, tickers].copy()
+
+        report = deepcopy(cached_report)
+        report["requested_tickers"] = requested_tickers
+        report["requested_count"] = len(requested_tickers)
+        report["final_tickers"] = tickers
+        report["final_count"] = len(tickers)
+        report["shortfall"] = max(0, len(requested_tickers) - len(tickers))
+        report["replacements"] = [ticker for ticker in tickers if ticker not in requested_tickers]
+        report["removed"] = [
+            removal
+            for removal in cached_report.get("removed", [])
+            if removal.get("ticker") in requested_tickers
+            and not removal.get("replacement_candidate")
+        ]
+        report["observations"] = len(prices)
+        return prices, report
+
+    def run_with_shared_portfolio(**kwargs) -> PredictionRun:
+        kwargs["market_data_loader"] = load_shared_portfolio
+        return run_prediction(**kwargs)
+
+    return run_experiment(configurations, prediction_runner=run_with_shared_portfolio)
