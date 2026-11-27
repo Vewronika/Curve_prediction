@@ -1,12 +1,15 @@
 """Run multiple prediction configurations and retain each outcome."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from numbers import Integral
 from typing import Any, Callable, Iterable
 
 import pandas as pd
 
 from application.pipeline import PredictionRun, run_prediction
+from data_acess import provider
 
 
 @dataclass
@@ -108,3 +111,82 @@ def run_experiment(
             )
 
     return ExperimentResult(runs=outcomes)
+
+
+def build_k_target_configurations(
+    base_config: ExperimentConfig,
+    k_targets: Iterable[int],
+) -> list[ExperimentConfig]:
+    """Create one configuration per threshold, holding all other inputs fixed."""
+    thresholds = list(k_targets)
+    if not thresholds:
+        raise ValueError("Choose at least one k_target value for the experiment.")
+
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, Integral)
+        or value < 3
+        for value in thresholds
+    ):
+        raise ValueError("Every k_target must be a whole number of at least 3.")
+
+    if len(set(thresholds)) != len(thresholds):
+        raise ValueError("Each k_target value must be unique in the experiment.")
+
+    if base_config.data_mode == "csv" and base_config.custom_prices is not None:
+        asset_count = base_config.custom_prices.shape[1]
+        if any(value > asset_count for value in thresholds):
+            raise ValueError(
+                f"CSV data contains {asset_count} assets; k_target cannot exceed that count."
+            )
+
+    return [replace(base_config, k_target=int(value)) for value in thresholds]
+
+
+def run_k_target_experiment(
+    base_config: ExperimentConfig,
+    k_targets: Iterable[int],
+    *,
+    prediction_runner: Callable[..., PredictionRun] | None = None,
+    market_data_loader: Callable[..., tuple[pd.DataFrame, dict]] | None = None,
+) -> ExperimentResult:
+    """Run a threshold sweep while keeping the rest of the configuration fixed.
+
+    A live market portfolio is loaded once and reused for each threshold. This
+    keeps the comparison on the same observations and avoids repeated provider
+    requests. Injected prediction runners are called directly for deterministic
+    tests and callers that supply their own execution behavior.
+    """
+    configurations = build_k_target_configurations(base_config, k_targets)
+
+    if prediction_runner is not None:
+        return run_experiment(configurations, prediction_runner=prediction_runner)
+
+    cached_market_data: tuple[pd.DataFrame, dict] | None = None
+    market_data_attempted = False
+    market_data_error: Exception | None = None
+
+    def load_market_data_once(**kwargs) -> tuple[pd.DataFrame, dict]:
+        nonlocal cached_market_data, market_data_attempted, market_data_error
+        if not market_data_attempted:
+            market_data_attempted = True
+            loader = market_data_loader or provider.get_sliced_portfolio
+            try:
+                prices, report = loader(**kwargs)
+            except Exception as exc:
+                market_data_error = exc
+            else:
+                cached_market_data = (prices.copy(), deepcopy(report))
+        if market_data_error is not None:
+            raise market_data_error
+        if cached_market_data is None:
+            raise RuntimeError("Market data loading did not produce a result.")
+        prices, report = cached_market_data
+        return prices.copy(), deepcopy(report)
+
+    def run_with_shared_market_data(**kwargs) -> PredictionRun:
+        if kwargs["data_mode"] == "market":
+            kwargs["market_data_loader"] = load_market_data_once
+        return run_prediction(**kwargs)
+
+    return run_experiment(configurations, prediction_runner=run_with_shared_market_data)
