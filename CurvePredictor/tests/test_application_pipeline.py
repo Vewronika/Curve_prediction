@@ -34,14 +34,58 @@ class RunPredictionTests(unittest.TestCase):
         )
 
         self.assertEqual(run.asset_count, 3)
+        self.assertEqual(run.b_percent, -10.0)
         self.assertTrue(run.prices.equals(prices))
         self.assertEqual(run.data_report["provider"], "User-uploaded CSV")
         self.assertEqual(run.model_output["crash_probability"], 0.25)
         prior_inputs, active_inputs, asset_count, k_prior, k, k_target = runner.call_args.args
         self.assertEqual(asset_count, 3)
         self.assertEqual((k_prior, k, k_target), (2, 3, 3))
+        self.assertEqual(runner.call_args.kwargs["B"], -0.1)
         self.assertEqual(prior_inputs[0], [10.0, 11.0, 12.0])
         self.assertEqual(active_inputs[0], [12.0, 13.0, 14.0, 15.0])
+
+    def test_b_percent_is_converted_to_algorithm_scale(self):
+        for b_percent, expected_b in [(-100, -1.0), (-50, -0.5), (0, 0.0)]:
+            with self.subTest(b_percent=b_percent):
+                runner = Mock(return_value={"crash_probability": 0.25})
+
+                run = run_prediction(
+                    data_mode="csv",
+                    custom_prices=sample_prices(),
+                    k_prior=2,
+                    k=3,
+                    k_target=3,
+                    b_percent=b_percent,
+                    model_runner=runner,
+                )
+
+                self.assertEqual(runner.call_args.kwargs["B"], expected_b)
+                self.assertEqual(run.b_percent, float(b_percent))
+
+    def test_invalid_b_percent_is_rejected_before_loading_market_data(self):
+        loader = Mock()
+        runner = Mock()
+
+        for b_percent in [-100.1, 0.1, float("nan"), float("inf"), True, "-10"]:
+            with self.subTest(b_percent=b_percent):
+                with self.assertRaisesRegex(ValueError, "B must be"):
+                    run_prediction(
+                        data_mode="market",
+                        all_tickers=["AAA", "BBB", "CCC"],
+                        selected_tickers=["AAA", "BBB", "CCC"],
+                        target_date="2026-01-06",
+                        interval="1d",
+                        k_prior=2,
+                        k=3,
+                        k_target=3,
+                        b_percent=b_percent,
+                        market_data_loader=loader,
+                        model_runner=runner,
+                    )
+
+        loader.assert_not_called()
+        runner.assert_not_called()
 
     def test_market_data_loader_receives_required_window(self):
         prices = sample_prices()

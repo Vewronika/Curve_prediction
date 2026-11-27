@@ -1,5 +1,6 @@
 import streamlit as st
 import datetime
+import math
 from data_acess import provider
 import plotly.express as px
 import pandas as pd
@@ -8,6 +9,17 @@ from data_acess.db_utils import fetch_all_dataset_names, fetch_companies_by_data
 from application.pipeline import InsufficientObservationsError, run_prediction
 
 st.set_page_config(page_title="Predictor Engine", page_icon="📊", layout="wide")
+
+
+def is_positive_whole_number(value):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 1
+        and float(value).is_integer()
+    )
+
 
 if "step" not in st.session_state:
     st.session_state.step = 1
@@ -25,6 +37,10 @@ def next_step():
 
 def prev_step():
     st.session_state.step -= 1
+
+
+def edit_settings():
+    st.session_state.step = 2
 
 
 def reset_wizard():
@@ -173,42 +189,92 @@ if st.session_state.step == 1:
 elif st.session_state.step == 2:
     st.header("Configure the analysis")
     st.write("Choose the target period and observation windows used by the model.")
+    market_date_valid = True
+
+    with st.expander("Parameter guide"):
+        st.markdown(
+            "- **N** is the number of assets selected for this run.\n"
+            "- **k_target** is the number of assets that must default together for the model's systemic event.\n"
+            "- **K** is the number of time steps in the active window; K steps use K+1 price observations.\n"
+            "- **K_prior** is the number of time steps in the prior reference window; the windows share one boundary price observation.\n"
+            "- **B** is the algorithm barrier threshold, entered as a percentage."
+        )
+        st.caption("Uppercase K values count time steps; lowercase k_target counts assets.")
 
     with st.container(border=True):
         st.subheader("Market data")
         col1, col2 = st.columns(2)
         with col1:
-            st.date_input(
+            target_date = st.date_input(
                 "Target date",
                 value=datetime.date.today(),
                 key="target_date",
-                help="The engine counts backward from this date to fetch historical data."
+                help="The engine counts backward from this date to fetch historical data. Future dates are not valid for historical market data."
             )
+            if (
+                st.session_state.data_source == "Live Market Data (yfinance)"
+                and target_date > datetime.date.today()
+            ):
+                market_date_valid = False
+                st.error("Target date cannot be in the future for historical market data.")
         with col2:
             st.selectbox(
                 "Sampling interval",
                 options=["1d", "1h", "1wk"],
                 format_func=lambda x: {"1d": "Daily", "1h": "Hourly", "1wk": "Weekly"}[x],
-                key="frequency"
+                key="frequency",
+                help="K and K_prior count time steps at this sampling interval. For example, K=10 means 10 hourly steps and uses 11 hourly price observations in the active window.",
             )
 
     with st.container(border=True):
         st.subheader("Observation windows")
-        st.number_input("Prediction horizon (steps)", min_value=1, value=30, key="future_k")
-
-        advanced_mode = st.toggle("Set prior and active windows separately")
+        advanced_mode = st.toggle(
+            "Set prior and active windows separately",
+            key="advanced_mode",
+        )
+        windows_valid = True
 
         if not advanced_mode:
-            st.caption("Prior and active windows both use the prediction horizon.")
-            st.session_state.K = st.session_state.future_k
-            st.session_state.K_prior = st.session_state.future_k
+            future_k = st.number_input(
+                "Window length K = K_prior (steps)",
+                value=30,
+                step=1,
+                key="future_k",
+                help="With separate windows turned off, the prior reference and active windows use this same number of time steps.",
+            )
+            windows_valid = is_positive_whole_number(future_k)
+            if not windows_valid:
+                st.error("Prediction horizon must be a whole number of at least 1 step.")
+            else:
+                st.session_state.K = int(future_k)
+                st.session_state.K_prior = int(future_k)
+            st.caption("The prior reference window and active window both use this same length.")
         else:
-            st.warning("For a balanced setup, use similar lengths for the prior and active windows.")
+            st.warning("The model compares a prior reference window with an active window. Use similar lengths unless your experiment specifically studies different window sizes.")
             c1, c2 = st.columns(2)
             with c1:
-                st.number_input("Active window (K)", min_value=1, value=st.session_state.future_k, key="K")
+                k_value = st.number_input(
+                    "Active window K (steps)",
+                    value=30,
+                    step=1,
+                    key="K",
+                    help="Number of time steps in the active period. K steps require K+1 price observations.",
+                )
             with c2:
-                st.number_input("Prior window (K_prior)", min_value=1, value=st.session_state.future_k, key="K_prior")
+                k_prior_value = st.number_input(
+                    "Prior reference window K_prior (steps)",
+                    value=30,
+                    step=1,
+                    key="K_prior",
+                    help="Number of time steps in the prior reference period. It shares one boundary price observation with the active window.",
+                )
+            k_valid = is_positive_whole_number(k_value)
+            k_prior_valid = is_positive_whole_number(k_prior_value)
+            windows_valid = k_valid and k_prior_valid
+            if not k_valid:
+                st.error("Active window K must be a whole number of at least 1 step.")
+            if not k_prior_valid:
+                st.error("Prior window K_prior must be a whole number of at least 1 step.")
 
     with st.container(border=True):
         st.subheader("Systemic event threshold")
@@ -231,11 +297,11 @@ elif st.session_state.step == 2:
                 st.session_state["k_target"] = min(max(3, num_companies // 2), num_companies)
 
             st.slider(
-                f"How many companies out of {num_companies} must default to trigger a 'Systemic Crash' (k)?",
+                f"How many companies out of {num_companies} must default to trigger the model's systemic event (k_target)?",
                 min_value=3,
                 max_value=num_companies,
                 key="k_target",
-                help="Defines the threshold k used by the mathematical model; this is a modeling choice, not a validated real-world crash label."
+                help="This is a count of assets, not a time-window length. It defines the model's event threshold; it is not a validated real-world crash label."
             )
 
         if num_companies >= 3:
@@ -243,8 +309,45 @@ elif st.session_state.step == 2:
                 f"**Model definition:** The threshold is k={st.session_state.k_target} out of the currently selected N={num_companies} assets. This is the model's systemic-event definition, not evidence that these companies will literally default at the same time."
             )
 
-    total_needed = st.session_state.K_prior + st.session_state.K + 1
-    st.info(f"**Data requirement:** This run needs **{total_needed:,} complete observations** at the selected interval.")
+    with st.container(border=True):
+        st.subheader("Barrier threshold B")
+        b_percent = st.number_input(
+            "Barrier threshold B (%)",
+            value=-10,
+            step=1,
+            key="b_percent",
+            help="Enter one percentage from -100% to 0%. The value is divided by 100 before it reaches the algorithm.",
+        )
+        b_is_valid = (
+            isinstance(b_percent, (int, float))
+            and not isinstance(b_percent, bool)
+            and math.isfinite(b_percent)
+            and -100 <= b_percent <= 0
+        )
+        if b_is_valid:
+            st.caption(f"Value passed to the algorithm: B = {b_percent / 100:g}")
+        else:
+            st.error("B must be between -100% and 0%. Correct this value before running the analysis.")
+
+    csv_history_valid = True
+    if windows_valid:
+        total_needed = int(st.session_state.K_prior) + int(st.session_state.K) + 1
+        st.info(f"**Data requirement:** This run needs **{total_needed:,} complete observations** at the selected interval.")
+        custom_prices = st.session_state.get("custom_df")
+        if (
+            st.session_state.data_source == "Upload Custom CSV"
+            and custom_prices is not None
+            and len(custom_prices.dropna(axis=0, how="any")) < total_needed
+        ):
+            csv_history_valid = False
+            available_observations = len(custom_prices.dropna(axis=0, how="any"))
+            st.error(
+                f"This CSV has {available_observations} complete observations, but the selected windows need {total_needed}. "
+                "Reduce the windows or upload more data."
+            )
+    else:
+        csv_history_valid = False
+        st.info("Correct the observation windows to see the data requirement.")
 
     nav1, nav2 = st.columns([1, 3], vertical_alignment="bottom")
 
@@ -256,7 +359,13 @@ elif st.session_state.step == 2:
             "Run analysis →",
             on_click=next_step,
             type="primary",
-            disabled=num_companies < 3,
+            disabled=(
+                num_companies < 3
+                or not b_is_valid
+                or not windows_valid
+                or not csv_history_valid
+                or not market_date_valid
+            ),
             use_container_width=True,
         )
 
@@ -266,6 +375,11 @@ elif st.session_state.step == 2:
 elif st.session_state.step == 3:
     st.header("Analysis results")
     st.write("Review the model output and the data used for this run.")
+    st.button(
+        "← Adjust settings",
+        on_click=edit_settings,
+        help="Return to model settings while keeping your selected data and current values.",
+    )
 
     simulation_success = False
 
@@ -282,6 +396,7 @@ elif st.session_state.step == 3:
                 k_prior=st.session_state.K_prior,
                 k=st.session_state.K,
                 k_target=st.session_state.get("k_target"),
+                b_percent=st.session_state.get("b_percent", -10),
                 custom_prices=st.session_state.get("custom_df"),
                 all_tickers=st.session_state.get("all_dataset_tickers"),
                 selected_tickers=st.session_state.get("tickers"),
@@ -296,6 +411,7 @@ elif st.session_state.step == 3:
             K = run.k
             K_prior = run.k_prior
             k_target = run.k_target
+            b_percent = run.b_percent
             st.session_state.data_report = data_report
 
             st.write(f"Validated matrix: {raw_df.shape[0]} periods × {raw_df.shape[1]} assets.")
@@ -332,6 +448,8 @@ elif st.session_state.step == 3:
         sum_col4.metric("Data Frequency", st.session_state.frequency)
         sum_col5.metric("Prior Drift Window", f"{st.session_state.K_prior} steps")
         sum_col6.metric("Active Sim Window", f"{st.session_state.K} steps")
+
+        st.metric("Barrier threshold B", f"{b_percent:g}%")
 
         report = st.session_state.get("data_report", {})
         with st.expander("Data quality and portfolio changes", expanded=bool(report.get("removed") or report.get("replacements"))):

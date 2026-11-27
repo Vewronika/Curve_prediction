@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from numbers import Integral
+import math
+from numbers import Integral, Real
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -20,6 +21,7 @@ class ExperimentConfig:
     k_prior: int
     k: int
     k_target: int | None
+    b_percent: float = -10.0
     custom_prices: pd.DataFrame | None = None
     all_tickers: Iterable[str] | None = None
     selected_tickers: Iterable[str] | None = None
@@ -34,6 +36,7 @@ class ExperimentConfig:
             "k_prior": self.k_prior,
             "k": self.k,
             "k_target": self.k_target,
+            "b_percent": self.b_percent,
             "custom_prices": self.custom_prices,
             "all_tickers": self.all_tickers,
             "selected_tickers": self.selected_tickers,
@@ -431,6 +434,117 @@ def run_k_experiment(
                 loader = market_data_loader or provider.get_sliced_portfolio
                 prices, report = loader(**kwargs)
                 return prices.copy(), deepcopy(report)
+            raise market_data_error
+        if cached_market_data is None:
+            raise RuntimeError("Market data loading did not produce a result.")
+        prices, report = cached_market_data
+        return prices.copy(), deepcopy(report)
+
+    def run_with_shared_market_data(**kwargs) -> PredictionRun:
+        kwargs["market_data_loader"] = load_market_data_once
+        return run_prediction(**kwargs)
+
+    return run_experiment(configurations, prediction_runner=run_with_shared_market_data)
+
+
+def build_b_configurations(
+    base_config: ExperimentConfig,
+    b_percent_values: Iterable[float],
+) -> list[ExperimentConfig]:
+    """Create one configuration per percent-scale B value, holding other inputs fixed."""
+    values = list(b_percent_values)
+    if not values:
+        raise ValueError("Choose at least one B value for the experiment.")
+
+    try:
+        percentages = [float(value) for value in values]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Every B value must be a number between -100 and 0 percent.") from exc
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(percent)
+        or not -100 <= percent <= 0
+        for value, percent in zip(values, percentages)
+    ):
+        raise ValueError("Every B value must be between -100 and 0 percent.")
+    if len(set(percentages)) != len(percentages):
+        raise ValueError("Each B value must be unique in the experiment.")
+
+    if base_config.data_mode == "market":
+        if base_config.selected_tickers is None:
+            raise ValueError("Select market assets before varying B.")
+        selected_tickers = list(dict.fromkeys(base_config.selected_tickers))
+        if not selected_tickers:
+            raise ValueError("Select market assets before varying B.")
+        all_tickers = (
+            list(base_config.all_tickers) if base_config.all_tickers is not None else None
+        )
+        base_config = replace(
+            base_config,
+            all_tickers=all_tickers,
+            selected_tickers=selected_tickers,
+        )
+    elif base_config.data_mode == "csv" and base_config.custom_prices is None:
+        raise ValueError("Provide CSV price data before varying B.")
+    elif base_config.data_mode != "csv":
+        raise ValueError(f"Unsupported data mode: {base_config.data_mode}")
+
+    return [replace(base_config, b_percent=value) for value in percentages]
+
+
+def build_b_percent_values(
+    start: int = -50,
+    end: int = 0,
+    step: int = 2,
+) -> list[int]:
+    """Build the default B sweep in whole percent values, including its endpoint."""
+    if any(
+        isinstance(value, bool) or not isinstance(value, Integral)
+        for value in (start, end, step)
+    ):
+        raise ValueError("B range endpoints and step must be whole numbers.")
+    if not (-100 <= start <= 0) or not (-100 <= end <= 0):
+        raise ValueError("B range endpoints must be between -100 and 0 percent.")
+    if start > end:
+        raise ValueError("B range start must be less than or equal to its end.")
+    if step < 1:
+        raise ValueError("B step must be at least 1 percent.")
+
+    values = list(range(start, end + 1, step))
+    if values[-1] != end:
+        values.append(end)
+    return values
+
+
+def run_b_experiment(
+    base_config: ExperimentConfig,
+    b_percent_values: Iterable[float],
+    *,
+    prediction_runner: Callable[..., PredictionRun] | None = None,
+    market_data_loader: Callable[..., tuple[pd.DataFrame, dict]] | None = None,
+) -> ExperimentResult:
+    """Run a B sweep, reusing one live-market dataset for every B value."""
+    configurations = build_b_configurations(base_config, b_percent_values)
+    if base_config.data_mode != "market" or prediction_runner is not None:
+        return run_experiment(configurations, prediction_runner=prediction_runner)
+
+    cached_market_data: tuple[pd.DataFrame, dict] | None = None
+    market_data_attempted = False
+    market_data_error: Exception | None = None
+
+    def load_market_data_once(**kwargs) -> tuple[pd.DataFrame, dict]:
+        nonlocal cached_market_data, market_data_attempted, market_data_error
+        if not market_data_attempted:
+            market_data_attempted = True
+            loader = market_data_loader or provider.get_sliced_portfolio
+            try:
+                prices, report = loader(**kwargs)
+            except Exception as exc:
+                market_data_error = exc
+            else:
+                cached_market_data = (prices.copy(), deepcopy(report))
+        if market_data_error is not None:
             raise market_data_error
         if cached_market_data is None:
             raise RuntimeError("Market data loading did not produce a result.")

@@ -1,4 +1,5 @@
 import datetime
+import math
 from io import BytesIO
 
 import pandas as pd
@@ -7,6 +8,7 @@ import streamlit as st
 
 from application.experiment_runner import (
     ExperimentConfig,
+    run_b_experiment,
     run_k_experiment,
     run_k_target_experiment,
     run_portfolio_size_experiment,
@@ -21,13 +23,31 @@ RESULT_STATE_KEY = "experiment_result"
 DEFAULT_UNIVERSE_RANGE = 50
 
 
+def _is_positive_whole_number(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 1
+        and float(value).is_integer()
+    )
+
+
 def _requested_size(config: ExperimentConfig) -> int:
     if config.data_mode == "csv":
         return config.custom_prices.shape[1]
     return len(config.selected_tickers)
 
 
-def _range_values(label: str, minimum: int, maximum: int, key: str) -> list[int]:
+def _range_values(
+    label: str,
+    minimum: int,
+    maximum: int,
+    key: str,
+    *,
+    default_range: tuple[int, int] | None = None,
+    default_step: int = 1,
+) -> list[int]:
     if minimum == maximum:
         st.info(f"Only {minimum} is available for {label}.")
         return [minimum]
@@ -36,23 +56,28 @@ def _range_values(label: str, minimum: int, maximum: int, key: str) -> list[int]
         f"{label} range",
         min_value=minimum,
         max_value=maximum,
-        value=(minimum, maximum),
+        value=default_range or (minimum, maximum),
         key=f"{key}_range_{minimum}_{maximum}",
     )
     start, end = selected_range
     step = st.number_input(
-        f"Step between {label} values",
-        min_value=1,
-        max_value=max(1, maximum - minimum),
-        value=1,
+        f"Increment between tested {label} values",
+        value=default_step,
         step=1,
         key=f"{key}_step_{minimum}_{maximum}",
-        help="Step 1 runs every value in the selected range. Larger steps skip values.",
+        help="Step 1 tests every value. Larger steps skip intermediate values; the selected end value is still included.",
     )
+    if not _is_positive_whole_number(step):
+        st.error("Step must be a whole number of at least 1.")
+        return []
+    max_step = max(1, maximum - minimum)
+    if step > max_step:
+        st.error(f"Step must be no greater than {max_step} for this selected range.")
+        return []
     values = list(range(start, end + 1, int(step)))
     if values[-1] != end:
         values.append(end)
-    st.caption(f"Values to run: {', '.join(map(str, values))} · {len(values)} runs")
+    st.caption(f"Values tested: {', '.join(map(str, values))} · {len(values)} runs")
     return values
 
 
@@ -85,6 +110,7 @@ def _render_results(experiment):
                 "Requested N": requested_n,
                 "Usable N": actual_n,
                 "k_target": run.config.k_target,
+                "B (%)": run.config.b_percent,
                 "K": run.config.k,
                 "K_prior": run.config.k_prior,
                 "Crash probability": probability_text,
@@ -100,6 +126,7 @@ def _render_results(experiment):
         "Vary portfolio size N": ("Requested N", "Portfolio size N"),
         "Vary systemic threshold k_target": ("k_target", "Systemic threshold k_target"),
         "Vary active window K": ("K", "Active window K"),
+        "Vary barrier B": ("B (%)", "Barrier B (%)"),
     }
     x_column, x_label = axis_config.get(
         experiment_type, ("Requested N", "Portfolio size N")
@@ -115,6 +142,8 @@ def _render_results(experiment):
             {
                 x_column: getattr(run.config, x_column.lower())
                 if x_column == "k_target"
+                else run.config.b_percent
+                if x_column == "B (%)"
                 else (
                     run.config.k
                     if x_column == "K"
@@ -123,6 +152,7 @@ def _render_results(experiment):
                 "Crash probability (%)": float(probability) * 100,
                 "Usable N": run.prediction.asset_count,
                 "k_target": run.config.k_target,
+                "B (%)": run.config.b_percent,
                 "K": run.config.k,
                 "K_prior": run.config.k_prior,
             }
@@ -155,6 +185,8 @@ def _render_results(experiment):
             title = f"Details for k_target = {run.config.k_target} (N = {requested_n})"
         elif experiment_type == "Vary active window K":
             title = f"Details for K = {run.config.k} (N = {requested_n})"
+        elif experiment_type == "Vary barrier B":
+            title = f"Details for B = {run.config.b_percent:g}% (N = {requested_n})"
         else:
             title = f"Details for requested N = {requested_n}"
         with st.expander(title):
@@ -194,7 +226,7 @@ def _render_results(experiment):
 
 st.title("Experiments")
 st.caption(
-    "Change one model variable at a time and compare the results across configurations."
+    "These are one-factor-at-a-time sensitivity experiments: the model is rerun with selected parameter values, and its estimated crash probabilities are compared. They do not train a machine-learning model."
 )
 
 experiment_type = st.radio(
@@ -203,15 +235,54 @@ experiment_type = st.radio(
         "Vary portfolio size N",
         "Vary systemic threshold k_target",
         "Vary active window K",
+        "Vary barrier B",
     ],
     horizontal=True,
     key="experiment_type_selector",
     captions=[
-        "Hold k_target and the other settings fixed.",
-        "Hold the portfolio size and other settings fixed.",
-        "Hold K_prior, N, and k_target fixed.",
+        "Does the estimate change with portfolio size?",
+        "Does the estimate change with the event threshold?",
+        "Does the estimate change with active-window length?",
+        "Does the estimate change with barrier B?",
     ],
 )
+
+experiment_guides = {
+    "Vary portfolio size N": (
+        "How does the estimated systemic-crash probability change as the portfolio gets larger?",
+        "N changes. The selected k_target, B, K, and K_prior stay fixed. Each N uses a nested subset of the selected assets: the first N CSV columns or the first N assets in the chosen market-universe range.",
+    ),
+    "Vary systemic threshold k_target": (
+        "How does the estimate change when a systemic event requires more assets to default at the same time?",
+        "k_target changes while N, B, K, and K_prior stay fixed. k_target is a count of assets, not a time-window length.",
+    ),
+    "Vary active window K": (
+        "How sensitive is the estimate to the length of the active time period?",
+        "K changes while K_prior, N, k_target, and B stay fixed. First K and Last K set the smallest and largest active-window sizes tested; Increment sets the spacing. K counts time steps, so K=10 uses 11 price observations for the active window. The last value is included even when the increment does not land on it.",
+    ),
+    "Vary barrier B": (
+        "How sensitive is the estimate to the algorithm's barrier threshold?",
+        "B changes while N, k_target, K, and K_prior stay fixed. Values are selected as percentages and converted to decimal form before they reach the algorithm; for example, -10% becomes -0.1.",
+    ),
+}
+guide_question, guide_description = experiment_guides[experiment_type]
+with st.container(border=True):
+    st.subheader("What this experiment tests")
+    st.write(guide_question)
+    st.caption(guide_description)
+
+with st.expander("Parameter guide: N, k_target, K, K_prior, and B"):
+    st.markdown(
+        "- **N**: number of assets in one run.\n"
+        "- **k_target**: number of assets that must default together for the model's systemic event.\n"
+        "- **K**: number of time steps in the active window; K steps use K+1 price observations.\n"
+        "- **K_prior**: number of time steps in the prior reference window; the prior and active windows share one boundary price observation.\n"
+        "- **B**: algorithm barrier threshold, entered here as a percentage."
+    )
+    st.caption(
+        "Uppercase K describes time windows; lowercase k_target counts assets. "
+        "These experiments compare model outputs and do not train a machine-learning model."
+    )
 
 with st.container(border=True):
     st.subheader("1. Choose your data")
@@ -229,6 +300,7 @@ with st.container(border=True):
     data_ready = False
     available_assets = 0
     data_mode = "csv" if data_source == "Upload Custom CSV" else "market"
+    target_date_valid = True
 
     if data_mode == "csv":
         uploaded_file = st.file_uploader(
@@ -319,6 +391,9 @@ with st.container(border=True):
             key="n_experiment_target_date",
             help="The provider loads historical prices ending at this date.",
         )
+        if target_date > datetime.date.today():
+            target_date_valid = False
+            st.error("Target date cannot be in the future for historical market data.")
         interval = interval_col.selectbox(
             "Sampling interval",
             options=["1d", "1h", "1wk"],
@@ -330,39 +405,74 @@ with st.container(border=True):
         interval = None
 
     if experiment_type == "Vary active window K":
-        k_prior = st.number_input(
-            "Fixed prior window K_prior (steps)",
-            min_value=1,
+        k_prior_input = st.number_input(
+            "Fixed prior reference window K_prior (steps)",
             value=30,
             step=1,
             key="k_sweep_k_prior",
-            help="K_prior stays the same while the active window K changes.",
+            help="This prior reference period stays fixed while the active window K is varied.",
         )
+        prior_window_valid = _is_positive_whole_number(k_prior_input)
+        window_inputs_valid = prior_window_valid
+        if not prior_window_valid:
+            st.error("Prior window K_prior must be a whole number of at least 1 step.")
+        k_prior = int(k_prior_input) if prior_window_valid else 1
         k = 1
     else:
         separate_windows = st.toggle(
             "Set prior and active windows separately",
             key="n_experiment_separate_windows",
+            help="When off, K and K_prior use the same observation count. When on, enter them independently.",
         )
         if separate_windows:
             window_col1, window_col2 = st.columns(2)
-            k = window_col1.number_input(
-                "Active window K (steps)", min_value=1, value=30, step=1, key="n_experiment_k"
+            k_input = window_col1.number_input(
+                "Active window K (steps)",
+                value=30,
+                step=1,
+                key="n_experiment_k",
+                help="Number of time steps in the active period. K steps require K+1 price observations.",
             )
-            k_prior = window_col2.number_input(
-                "Prior window K_prior (steps)", min_value=1, value=30, step=1,
+            k_prior_input = window_col2.number_input(
+                "Prior reference window K_prior (steps)", value=30, step=1,
                 key="n_experiment_k_prior",
+                help="Number of time steps in the prior reference period. It shares one boundary price observation with the active window.",
             )
+            k_valid = _is_positive_whole_number(k_input)
+            prior_window_valid = _is_positive_whole_number(k_prior_input)
+            window_inputs_valid = k_valid and prior_window_valid
+            if not k_valid:
+                st.error("Active window K must be a whole number of at least 1 step.")
+            if not prior_window_valid:
+                st.error("Prior window K_prior must be a whole number of at least 1 step.")
+            k = int(k_input) if k_valid else 1
+            k_prior = int(k_prior_input) if prior_window_valid else 1
         else:
             horizon = st.number_input(
                 "Window length for K and K_prior (steps)",
-                min_value=1,
                 value=30,
                 step=1,
                 key="n_experiment_window_length",
+                help="Uses the same number of time steps for the prior reference and active periods.",
             )
-            k = int(horizon)
-            k_prior = int(horizon)
+            window_inputs_valid = _is_positive_whole_number(horizon)
+            if not window_inputs_valid:
+                st.error("Window length must be a whole number of at least 1 step.")
+            k = int(horizon) if window_inputs_valid else 1
+            k_prior = int(horizon) if window_inputs_valid else 1
+
+    if experiment_type == "Vary barrier B":
+        fixed_b_percent = None
+    else:
+        fixed_b_percent = st.slider(
+            "Fixed barrier B (%)",
+            min_value=-100,
+            max_value=0,
+            value=-10,
+            step=1,
+            key="experiment_fixed_b_percent",
+            help="The application converts this percent value to the decimal passed to the model. -10% is passed as -0.1.",
+        )
 
     fixed_n = None
     fixed_k_target = None
@@ -446,38 +556,55 @@ with st.container(border=True):
             k_max_value = csv_max_k if csv_max_k is not None else None
             default_k_end = csv_max_k if csv_max_k is not None else 30
             k_start = k_from_col.number_input(
-                "Start K",
-                min_value=1,
-                max_value=k_max_value,
+                "First active window K to test",
                 value=1,
                 step=1,
                 key=f"k_sweep_start_{available_assets}_{k_prior}_{csv_max_k}",
+                help="The smallest active-window length included in this sensitivity experiment.",
             )
             k_end = k_to_col.number_input(
-                "End K",
-                min_value=1,
-                max_value=k_max_value,
+                "Last active window K to test",
                 value=default_k_end,
                 step=1,
                 key=f"k_sweep_end_{available_assets}_{k_prior}_{csv_max_k}",
+                help="The largest active-window length included. This endpoint is always tested.",
             )
             k_step = k_step_col.number_input(
-                "Step between K values",
-                min_value=1,
+                "Increment between tested K values",
                 value=1,
                 step=1,
                 key=f"k_sweep_step_{available_assets}_{k_prior}",
-                help="Step 1 tests each K in the selected range.",
+                help="Example: first 1, last 10, increment 3 tests K = 1, 4, 7, 10.",
             )
-            if k_end < k_start:
-                st.warning("End K must be greater than or equal to Start K.")
+            k_sweep_fields_valid = (
+                _is_positive_whole_number(k_start)
+                and _is_positive_whole_number(k_end)
+                and _is_positive_whole_number(k_step)
+            )
+            if not _is_positive_whole_number(k_start):
+                st.error("First active window K must be a whole number of at least 1.")
+            if not _is_positive_whole_number(k_end):
+                st.error("Last active window K must be a whole number of at least 1.")
+            if not _is_positive_whole_number(k_step):
+                st.error("Increment between K values must be a whole number of at least 1.")
+            if (
+                k_sweep_fields_valid
+                and k_max_value is not None
+                and (k_start > k_max_value or k_end > k_max_value)
+            ):
+                st.error(
+                    f"First and last active window K cannot exceed {k_max_value} for this CSV and prior window."
+                )
                 experiment_values = []
-            else:
+            elif k_sweep_fields_valid and k_end < k_start:
+                st.warning("Last active window K must be greater than or equal to the first K.")
+                experiment_values = []
+            elif k_sweep_fields_valid and window_inputs_valid:
                 experiment_values = list(range(int(k_start), int(k_end) + 1, int(k_step)))
                 if experiment_values[-1] != int(k_end):
                     experiment_values.append(int(k_end))
                 st.caption(
-                    f"K values to run: {', '.join(map(str, experiment_values))} · "
+                    f"Active-window K values tested: {', '.join(map(str, experiment_values))} · "
                     f"{len(experiment_values)} runs"
                 )
                 if len(experiment_values) > 100:
@@ -485,6 +612,37 @@ with st.container(border=True):
                         f"This will run {len(experiment_values)} predictions and may take a while. "
                         "Increase the step to reduce the number of runs."
                     )
+            else:
+                experiment_values = []
+    elif experiment_type == "Vary barrier B":
+        fixed_n = st.slider(
+            "Fixed portfolio size N",
+            min_value=3,
+            max_value=available_assets,
+            value=available_assets,
+            key=f"b_sweep_portfolio_size_{available_assets}",
+            help="This number of assets stays fixed while B changes.",
+        )
+        if fixed_n == 3:
+            fixed_k_target = 3
+            st.info("With N = 3, k_target is fixed at 3.")
+        else:
+            fixed_k_target = st.slider(
+                "Fixed systemic-event threshold k_target",
+                min_value=3,
+                max_value=fixed_n,
+                value=min(max(3, fixed_n // 2), fixed_n),
+                key=f"b_sweep_k_target_{fixed_n}",
+                help="This threshold stays fixed while B changes.",
+            )
+        experiment_values = _range_values(
+            "Barrier B (%)",
+            minimum=-100,
+            maximum=0,
+            key="b_experiment_values",
+            default_range=(-50, 0),
+            default_step=2,
+        )
     else:
         experiment_values = []
 
@@ -494,16 +652,32 @@ with st.container(border=True):
         else int(k)
     )
     required_observations = int(k_prior) + max_selected_k + 1
-    st.info(f"Each run needs at least **{required_observations:,} complete observations**.")
-    if custom_prices is not None and len(custom_prices) < required_observations:
+    if window_inputs_valid and experiment_values:
+        st.info(f"Each run needs at least **{required_observations:,} complete observations**.")
+    else:
+        st.info("Choose valid window and experiment values to see the data requirement.")
+    if (
+        window_inputs_valid
+        and experiment_values
+        and custom_prices is not None
+        and len(custom_prices) < required_observations
+    ):
         st.warning(
             f"The uploaded CSV has {len(custom_prices)} observations, but the chosen windows need "
             f"{required_observations}. Reduce the window lengths or upload more data."
         )
 
-if data_ready and available_assets >= 3:
+if (
+    data_ready
+    and available_assets >= 3
+    and window_inputs_valid
+    and target_date_valid
+    and experiment_values
+):
     if experiment_type == "Vary portfolio size N":
-        st.caption(f"Fixed for every run: k_target = {fixed_k_target}.")
+        st.caption(
+            f"Fixed for every run: k_target = {fixed_k_target}, B = {fixed_b_percent}%."
+        )
         if data_mode == "csv":
             st.caption(
                 f"For CSV data, each N uses the first N columns. {available_assets} assets are available."
@@ -514,18 +688,29 @@ if data_ready and available_assets >= 3:
             st.caption(
                 f"The fixed portfolio uses the first {fixed_n} CSV columns."
             )
-        st.caption(f"Also fixed for every run: K = {k}, K_prior = {k_prior}.")
+        st.caption(
+            f"Also fixed for every run: K = {k}, K_prior = {k_prior}, "
+            f"B = {fixed_b_percent}%."
+        )
+    elif experiment_type == "Vary active window K":
+        st.caption(
+            f"Fixed for every run: N = {fixed_n}, k_target = {fixed_k_target}, "
+            f"K_prior = {k_prior}, B = {fixed_b_percent}%."
+        )
+        st.caption("K changes to the values entered above.")
     else:
         st.caption(
             f"Fixed for every run: N = {fixed_n}, k_target = {fixed_k_target}, "
-            f"K_prior = {k_prior}."
+            f"K = {k}, K_prior = {k_prior}."
         )
-        st.caption("K changes to the values entered above.")
+        st.caption("B changes to the values selected above.")
 
 can_run = (
     data_ready
     and available_assets >= 3
     and bool(experiment_values)
+    and window_inputs_valid
+    and target_date_valid
     and (custom_prices is None or len(custom_prices) >= required_observations)
 )
 
@@ -548,6 +733,7 @@ configuration_signature = (
     int(k),
     fixed_n,
     fixed_k_target,
+    fixed_b_percent,
     tuple(experiment_values),
     st.session_state.get("n_experiment_replace_incomplete", True),
 )
@@ -566,6 +752,7 @@ if st.button(
         if experiment_type in [
             "Vary systemic threshold k_target",
             "Vary active window K",
+            "Vary barrier B",
         ]
         else None
     )
@@ -574,6 +761,11 @@ if st.button(
         k_prior=int(k_prior),
         k=int(experiment_values[0] if experiment_type == "Vary active window K" else k),
         k_target=int(fixed_k_target or 3),
+        b_percent=float(
+            experiment_values[0]
+            if experiment_type == "Vary barrier B"
+            else fixed_b_percent
+        ),
         custom_prices=(
             custom_prices.iloc[:, :config_n].copy()
             if custom_prices is not None and config_n is not None
@@ -599,8 +791,10 @@ if st.button(
                 experiment = run_portfolio_size_experiment(config, experiment_values)
             elif experiment_type == "Vary systemic threshold k_target":
                 experiment = run_k_target_experiment(config, experiment_values)
-            else:
+            elif experiment_type == "Vary active window K":
                 experiment = run_k_experiment(config, experiment_values)
+            else:
+                experiment = run_b_experiment(config, experiment_values)
             st.session_state[RESULT_STATE_KEY] = experiment
             st.session_state["experiment_result_type"] = experiment_type
             st.session_state[signature_state_key] = configuration_signature

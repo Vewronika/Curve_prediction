@@ -2,10 +2,10 @@ import math
 import random
 
 
-def run_algorithm(P_prior, P, N, K_prior, K, k_target):
+def run_algorithm(P_prior, P, N, K_prior, K, k_target, B):
+    """Run the model with B as a decimal-scale log-return barrier."""
     T = 1.0
     dt = T / K
-    B = -0.10
     alpha = 1.0
     gamma = 0.5
 

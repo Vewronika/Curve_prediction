@@ -1,7 +1,9 @@
 """Reusable orchestration for one CurvePredictor analysis run."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from numbers import Real
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -25,6 +27,7 @@ class PredictionRun:
     k_prior: int
     k: int
     k_target: int
+    b_percent: float = -10.0
 
 
 def run_prediction(
@@ -33,6 +36,7 @@ def run_prediction(
     k_prior: int,
     k: int,
     k_target: int | None,
+    b_percent: float = -10.0,
     custom_prices: pd.DataFrame | None = None,
     all_tickers: Iterable[str] | None = None,
     selected_tickers: Iterable[str] | None = None,
@@ -52,6 +56,7 @@ def run_prediction(
     k = _window_steps("K", k)
     if k_prior < 1 or k < 1:
         raise ValueError("Both time windows must be at least 1 step.")
+    b_percent = _barrier_percent(b_percent)
     required_rows = k_prior + k + 1
 
     if data_mode == "csv":
@@ -127,7 +132,15 @@ def run_prediction(
         raise ValueError("The asset count does not match the input data.")
 
     runner = model_runner or algorithm.run_algorithm
-    model_output = runner(prior_inputs, active_inputs, asset_count, k_prior, k, k_target)
+    model_output = runner(
+        prior_inputs,
+        active_inputs,
+        asset_count,
+        k_prior,
+        k,
+        k_target,
+        B=b_percent / 100.0,
+    )
 
     return PredictionRun(
         prices=prices,
@@ -137,6 +150,7 @@ def run_prediction(
         k_prior=k_prior,
         k=k,
         k_target=k_target,
+        b_percent=b_percent,
     )
 
 
@@ -149,3 +163,16 @@ def _window_steps(name: str, value: int) -> int:
     if isinstance(value, bool) or steps != value:
         raise ValueError(f"{name} must be a whole number of steps.")
     return steps
+
+
+def _barrier_percent(value: int | float) -> float:
+    """Validate the user's percent-scale barrier and return it as a float."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError("B must be a number between -100 and 0 percent.")
+    try:
+        percent = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("B must be a number between -100 and 0 percent.") from exc
+    if not math.isfinite(percent) or not -100 <= percent <= 0:
+        raise ValueError("B must be between -100 and 0 percent.")
+    return percent

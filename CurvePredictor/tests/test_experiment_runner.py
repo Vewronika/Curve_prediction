@@ -5,10 +5,13 @@ import pandas as pd
 
 from application.experiment_runner import (
     ExperimentConfig,
+    build_b_configurations,
+    build_b_percent_values,
     build_k_configurations,
     build_k_target_configurations,
     build_portfolio_size_configurations,
     run_experiment,
+    run_b_experiment,
     run_k_experiment,
     run_k_target_experiment,
     run_portfolio_size_experiment,
@@ -423,6 +426,93 @@ class KWindowExperimentTests(unittest.TestCase):
         self.assertEqual(loader.call_args.kwargs["required_rows"], 7)
         self.assertEqual([k_value for k_value, _ in loaded_for_k], [1, 4])
         self.assertTrue(loaded_for_k[0][1].equals(loaded_for_k[1][1]))
+
+
+class BExperimentTests(unittest.TestCase):
+    def test_default_b_percent_range_is_minus_50_to_zero_by_two(self):
+        values = build_b_percent_values()
+
+        self.assertEqual(values[0], -50)
+        self.assertEqual(values[-1], 0)
+        self.assertEqual(len(values), 26)
+        self.assertTrue(all(right - left == 2 for left, right in zip(values, values[1:])))
+
+    def test_b_percent_range_validation_and_endpoint_inclusion(self):
+        self.assertEqual(build_b_percent_values(-9, 0, 4), [-9, -5, -1, 0])
+
+        for args, message in [
+            ((-101, 0, 1), "between -100 and 0"),
+            ((-10, 1, 1), "between -100 and 0"),
+            ((0, -10, 1), "less than or equal"),
+            ((-10, 0, 0), "at least 1"),
+            ((-10.5, 0, 1), "whole numbers"),
+        ]:
+            with self.subTest(args=args):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_b_percent_values(*args)
+
+    def test_builder_varies_b_percent_and_holds_other_inputs_fixed(self):
+        base = sample_config(k_target=3)
+
+        configurations = build_b_configurations(base, [-50, -48, -46, 0])
+
+        self.assertEqual(
+            [config.b_percent for config in configurations],
+            [-50.0, -48.0, -46.0, 0.0],
+        )
+        self.assertEqual([config.k for config in configurations], [base.k] * 4)
+        self.assertEqual([config.k_prior for config in configurations], [base.k_prior] * 4)
+        self.assertEqual([config.k_target for config in configurations], [base.k_target] * 4)
+
+    def test_existing_experiment_builders_keep_b_fixed(self):
+        base = sample_config(k_target=3)
+        base.b_percent = -42
+        base.custom_prices = pd.DataFrame(
+            {"AAA": range(8), "BBB": range(8), "CCC": range(8), "DDD": range(8)},
+            index=pd.date_range("2026-01-01", periods=8, freq="D"),
+        )
+
+        configurations = (
+            build_k_target_configurations(base, [3, 4])
+            + build_portfolio_size_configurations(base, [3, 4])
+            + build_k_configurations(base, [1, 2])
+        )
+
+        self.assertTrue(all(config.b_percent == -42 for config in configurations))
+        self.assertEqual(base.to_prediction_kwargs()["b_percent"], -42)
+
+    def test_builder_rejects_out_of_range_nonfinite_and_duplicate_values(self):
+        base = sample_config()
+
+        for values, message in [
+            ([], "at least one B"),
+            ([-102], "between -100 and 0"),
+            ([1], "between -100 and 0"),
+            ([float("nan")], "between -100 and 0"),
+            ([True], "between -100 and 0"),
+            ([-10, -10.0], "unique"),
+        ]:
+            with self.subTest(values=values):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_b_configurations(base, values)
+
+    def test_b_experiment_passes_each_percent_and_keeps_going_after_failure(self):
+        base = sample_config()
+        runner = Mock(
+            side_effect=[ValueError("barrier failed"), sample_prediction(k_target=3)]
+        )
+
+        experiment = run_b_experiment(base, [-10, -8], prediction_runner=runner)
+
+        self.assertEqual(experiment.total_runs, 2)
+        self.assertEqual(experiment.failed_runs, 1)
+        self.assertEqual(experiment.successful_runs, 1)
+        self.assertEqual([run.config.b_percent for run in experiment.runs], [-10.0, -8.0])
+        self.assertEqual(
+            [call.kwargs["b_percent"] for call in runner.call_args_list],
+            [-10.0, -8.0],
+        )
+        self.assertEqual(experiment.runs[0].error_message, "barrier failed")
 
 
 if __name__ == "__main__":
