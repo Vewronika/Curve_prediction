@@ -5,9 +5,11 @@ import pandas as pd
 
 from application.experiment_runner import (
     ExperimentConfig,
+    build_k_configurations,
     build_k_target_configurations,
     build_portfolio_size_configurations,
     run_experiment,
+    run_k_experiment,
     run_k_target_experiment,
     run_portfolio_size_experiment,
 )
@@ -319,6 +321,108 @@ class PortfolioSizeExperimentTests(unittest.TestCase):
         self.assertEqual(captured[0][1]["requested_count"], 3)
         self.assertEqual(captured[0][1]["final_count"], 3)
         self.assertEqual(captured[0][1]["replacements"], ["XXX"])
+
+
+class KWindowExperimentTests(unittest.TestCase):
+    def test_builder_varies_k_and_holds_prior_window_fixed(self):
+        base = sample_config()
+        base.custom_prices = pd.DataFrame(
+            {"AAA": range(10), "BBB": range(10), "CCC": range(10)},
+            index=pd.date_range("2026-01-01", periods=10, freq="D"),
+        )
+
+        configurations = build_k_configurations(base, [1, 3, 5])
+
+        self.assertEqual([config.k for config in configurations], [1, 3, 5])
+        self.assertEqual([config.k_prior for config in configurations], [1, 1, 1])
+        self.assertEqual([config.k_target for config in configurations], [3, 3, 3])
+        self.assertEqual(
+            [len(config.custom_prices) for config in configurations],
+            [10, 10, 10],
+        )
+
+    def test_builder_rejects_invalid_or_too_large_k_values(self):
+        base = sample_config()
+        base.custom_prices = pd.DataFrame(
+            {"AAA": range(5), "BBB": range(5), "CCC": range(5)},
+            index=pd.date_range("2026-01-01", periods=5, freq="D"),
+        )
+
+        for values, message in [
+            ([], "at least one K"),
+            ([2, 2], "unique"),
+            ([0], "at least 1"),
+            ([1.5], "whole number"),
+            ([4], "maximum K of 3"),
+        ]:
+            with self.subTest(values=values):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_k_configurations(base, values)
+
+    def test_runner_passes_each_k_and_continues_after_a_failure(self):
+        base = sample_config()
+        base.custom_prices = pd.DataFrame(
+            {"AAA": range(5), "BBB": range(5), "CCC": range(5)},
+            index=pd.date_range("2026-01-01", periods=5, freq="D"),
+        )
+        runner = Mock(
+            side_effect=[ValueError("K failed"), sample_prediction(k_target=3)]
+        )
+
+        experiment = run_k_experiment(base, [1, 2], prediction_runner=runner)
+
+        self.assertEqual(experiment.total_runs, 2)
+        self.assertEqual(experiment.failed_runs, 1)
+        self.assertEqual(experiment.successful_runs, 1)
+        self.assertEqual([run.config.k for run in experiment.runs], [1, 2])
+        self.assertEqual(experiment.runs[0].error_message, "K failed")
+        self.assertEqual([call.kwargs["k"] for call in runner.call_args_list], [1, 2])
+
+    def test_live_market_k_sweep_fetches_enough_history_once(self):
+        base = ExperimentConfig(
+            data_mode="market",
+            k_prior=2,
+            k=1,
+            k_target=3,
+            all_tickers=["AAA", "BBB", "CCC"],
+            selected_tickers=["AAA", "BBB", "CCC"],
+            target_date="2026-01-06",
+            interval="1d",
+        )
+        prices = pd.DataFrame(
+            {ticker: range(10, 17) for ticker in ["AAA", "BBB", "CCC"]},
+            index=pd.date_range("2026-01-01", periods=7, freq="D"),
+        )
+        loader = Mock(return_value=(prices, {"provider": "fixture"}))
+        loaded_for_k = []
+
+        def fake_prediction_runner(**kwargs):
+            run_prices, _ = kwargs["market_data_loader"](
+                all_tickers=kwargs["all_tickers"],
+                selected_tickers=kwargs["selected_tickers"],
+                end_date=kwargs["target_date"],
+                interval=kwargs["interval"],
+                required_rows=kwargs["k_prior"] + kwargs["k"] + 1,
+                replace_incomplete=kwargs["replace_incomplete"],
+            )
+            loaded_for_k.append((kwargs["k"], run_prices))
+            return sample_prediction(k_target=3)
+
+        with patch(
+            "application.experiment_runner.run_prediction",
+            side_effect=fake_prediction_runner,
+        ):
+            experiment = run_k_experiment(
+                base,
+                [1, 4],
+                market_data_loader=loader,
+            )
+
+        self.assertEqual(experiment.successful_runs, 2)
+        loader.assert_called_once()
+        self.assertEqual(loader.call_args.kwargs["required_rows"], 7)
+        self.assertEqual([k_value for k_value, _ in loaded_for_k], [1, 4])
+        self.assertTrue(loaded_for_k[0][1].equals(loaded_for_k[1][1]))
 
 
 if __name__ == "__main__":

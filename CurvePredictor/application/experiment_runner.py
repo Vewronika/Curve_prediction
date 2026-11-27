@@ -335,3 +335,110 @@ def run_portfolio_size_experiment(
         return run_prediction(**kwargs)
 
     return run_experiment(configurations, prediction_runner=run_with_shared_portfolio)
+
+
+def build_k_configurations(
+    base_config: ExperimentConfig,
+    k_values: Iterable[int],
+) -> list[ExperimentConfig]:
+    """Create one configuration per K, keeping K_prior and other inputs fixed."""
+    windows = list(k_values)
+    if not windows:
+        raise ValueError("Choose at least one K value for the experiment.")
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, Integral)
+        or value < 1
+        for value in windows
+    ):
+        raise ValueError("Every K value must be a whole number of at least 1.")
+    if len(set(windows)) != len(windows):
+        raise ValueError("Each K value must be unique in the experiment.")
+    if (
+        isinstance(base_config.k_prior, bool)
+        or not isinstance(base_config.k_prior, Integral)
+        or base_config.k_prior < 1
+    ):
+        raise ValueError("Choose a fixed K_prior of at least 1 before the experiment.")
+
+    if base_config.data_mode == "csv":
+        if base_config.custom_prices is None:
+            raise ValueError("Provide CSV price data before choosing K values.")
+        max_window = len(base_config.custom_prices) - int(base_config.k_prior) - 1
+        if any(value > max_window for value in windows):
+            raise ValueError(
+                f"CSV data supports a maximum K of {max_window} "
+                f"with K_prior={base_config.k_prior}."
+            )
+    elif base_config.data_mode == "market":
+        if base_config.selected_tickers is None:
+            raise ValueError("Select market assets before choosing K values.")
+        selected_tickers = list(dict.fromkeys(base_config.selected_tickers))
+        if not selected_tickers:
+            raise ValueError("Select market assets before choosing K values.")
+        all_tickers = (
+            list(base_config.all_tickers) if base_config.all_tickers is not None else None
+        )
+        base_config = replace(
+            base_config,
+            all_tickers=all_tickers,
+            selected_tickers=selected_tickers,
+        )
+    else:
+        raise ValueError(f"Unsupported data mode: {base_config.data_mode}")
+
+    return [replace(base_config, k=int(value)) for value in windows]
+
+
+def run_k_experiment(
+    base_config: ExperimentConfig,
+    k_values: Iterable[int],
+    *,
+    prediction_runner: Callable[..., PredictionRun] | None = None,
+    market_data_loader: Callable[..., tuple[pd.DataFrame, dict]] | None = None,
+) -> ExperimentResult:
+    """Run a K sweep, loading enough live history once for the largest K."""
+    configurations = build_k_configurations(base_config, k_values)
+    if base_config.data_mode != "market" or prediction_runner is not None:
+        return run_experiment(configurations, prediction_runner=prediction_runner)
+
+    largest_config = max(configurations, key=lambda config: config.k)
+    largest_required_rows = largest_config.k_prior + largest_config.k + 1
+    cached_market_data: tuple[pd.DataFrame, dict] | None = None
+    market_data_attempted = False
+    market_data_error: Exception | None = None
+
+    def load_market_data_once(**kwargs) -> tuple[pd.DataFrame, dict]:
+        nonlocal cached_market_data, market_data_attempted, market_data_error
+        if not market_data_attempted:
+            market_data_attempted = True
+            loader = market_data_loader or provider.get_sliced_portfolio
+            try:
+                prices, report = loader(
+                    all_tickers=kwargs["all_tickers"],
+                    selected_tickers=kwargs["selected_tickers"],
+                    end_date=kwargs["end_date"],
+                    interval=kwargs["interval"],
+                    required_rows=largest_config.k_prior + largest_config.k + 1,
+                    replace_incomplete=kwargs["replace_incomplete"],
+                )
+            except Exception as exc:
+                market_data_error = exc
+            else:
+                cached_market_data = (prices.copy(), deepcopy(report))
+        if market_data_error is not None:
+            if kwargs["required_rows"] < largest_required_rows:
+                loader = market_data_loader or provider.get_sliced_portfolio
+                prices, report = loader(**kwargs)
+                return prices.copy(), deepcopy(report)
+            raise market_data_error
+        if cached_market_data is None:
+            raise RuntimeError("Market data loading did not produce a result.")
+        prices, report = cached_market_data
+        return prices.copy(), deepcopy(report)
+
+    def run_with_shared_market_data(**kwargs) -> PredictionRun:
+        kwargs["market_data_loader"] = load_market_data_once
+        return run_prediction(**kwargs)
+
+    return run_experiment(configurations, prediction_runner=run_with_shared_market_data)
