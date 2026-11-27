@@ -1,14 +1,13 @@
 import streamlit as st
 import datetime
 from data_acess import provider
-from data_acess import math_adapter as ma
-from method import algorithm
 import plotly.express as px
 import pandas as pd
 from data_acess.provider import parse_uploaded_csv
 from data_acess.db_utils import fetch_all_dataset_names, fetch_companies_by_dataset
+from application.pipeline import run_prediction
 
-st.set_page_config(page_title="Predictor Engine", layout="centered")
+st.set_page_config(page_title="Predictor Engine", page_icon="📊", layout="wide")
 
 if "step" not in st.session_state:
     st.session_state.step = 1
@@ -31,17 +30,33 @@ def prev_step():
 def reset_wizard():
     st.session_state.step = 1
 
-st.progress(st.session_state.step / 3.0, text=f"Step {st.session_state.step} of 3")
-st.markdown("---")
+step_labels = ["Choose data", "Configure model", "Review results"]
+current_step = st.session_state.step
+st.title("Predictor engine")
+st.caption("Run a single systemic-risk analysis using historical asset prices.")
+
+with st.container(border=True):
+    step_cols = st.columns(3)
+    for index, label in enumerate(step_labels, start=1):
+        marker = "✓" if index < current_step else f"{index:02d}"
+        label_text = f"**{marker} · {label}**" if index == current_step else f"{marker} · {label}"
+        step_cols[index - 1].markdown(label_text)
+    st.progress(current_step / 3.0, text=f"Step {current_step} of 3 · {step_labels[current_step - 1]}")
 
 # ==========================================
 # STEP 1: DATASET & ASSET SELECTION
 # ==========================================
 if st.session_state.step == 1:
-    st.header("1. Dataset Selection")
-    st.write("Choose where the data is coming from and which assets to analyze.")
+    st.header("Choose your data")
+    st.write("Select a live market universe or bring your own price history.")
 
-    st.radio("Data Source", ["Live Market Data (yfinance)", "Upload Custom CSV"], key="_data_source_widget", on_change=sync_data_source)
+    st.radio(
+        "Data source",
+        ["Live Market Data (yfinance)", "Upload Custom CSV"],
+        key="_data_source_widget",
+        on_change=sync_data_source,
+        horizontal=True,
+    )
 
     if st.session_state.data_source == "Live Market Data (yfinance)":
         available_datasets = fetch_all_dataset_names()
@@ -87,7 +102,7 @@ if st.session_state.step == 1:
                 elif "ui_company_selection" not in st.session_state:
                     st.session_state["ui_company_selection"] = ui_labels.copy()
 
-                with st.popover("See and Customize Companies", use_container_width=True):
+                with st.popover("Choose companies", use_container_width=True):
                     st.write("Select the companies to include. Changing the range above resets the selection to all companies in that range. Incomplete assets may be excluded and replaced from this same universe.")
                     selected_labels = st.multiselect(
                         "Review and Filter Companies",
@@ -108,10 +123,10 @@ if st.session_state.step == 1:
     else:
 
         st.info(
-            "**Format requirement:** The first column must contain dates. "
-            "All other columns must contain positive numeric asset prices, "
-            "with ticker symbols as headers. Dates must be unique and "
-            "ordered from oldest to newest. Missing prices are not allowed."
+            "**Prepare your price history**\n\n"
+            "CSV format: first column contains dates; each other column is one asset. "
+            "Dates must be unique and ordered oldest to newest. Prices must be positive "
+            "numbers with no missing values."
         )
 
         uploaded_file = st.file_uploader(
@@ -131,8 +146,8 @@ if st.session_state.step == 1:
                     f"and {len(custom_df)} trading periods."
                 )
 
-                with st.expander("Preview Uploaded Data"):
-                    st.dataframe(custom_df.head())
+                with st.expander("Preview uploaded data", expanded=True):
+                    st.dataframe(custom_df.head(), use_container_width=True)
 
             except ValueError as exc:
                 st.session_state.pop("custom_df", None)
@@ -145,171 +160,145 @@ if st.session_state.step == 1:
                 st.error("Could not process the uploaded file. Check its format.")
 
 
-    st.markdown("<br>", unsafe_allow_html=True)
-
     block_next_step = False
     if st.session_state.data_source == "Upload Custom CSV" and "custom_df" not in st.session_state:
         block_next_step = True
         st.warning("Please upload a CSV file to continue.")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.button("Next Step", on_click=next_step, type="primary", disabled=block_next_step)
+    st.button("Continue to model settings →", on_click=next_step, type="primary", disabled=block_next_step, use_container_width=True)
 
 # ==========================================
 # STEP 2: TIMEFRAME & MATH CONFIGURATION
 # ==========================================
 elif st.session_state.step == 2:
-    st.header("2. Timeframe & Model Parameters")
+    st.header("Configure the analysis")
+    st.write("Choose the target period and observation windows used by the model.")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.date_input(
-            "Target Date (Anchor)",
-            value=datetime.date.today(),
-            key="target_date",
-            help="The engine counts backward from this date to fetch historical data."
-        )
-    with col2:
-        st.selectbox(
-            "Data Frequency",
-            options=["1d", "1h", "1wk"],
-            format_func=lambda x: {"1d": "Daily", "1h": "Hourly", "1wk": "Weekly"}[x],
-            key="frequency"
-        )
+    with st.container(border=True):
+        st.subheader("Market data")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.date_input(
+                "Target date",
+                value=datetime.date.today(),
+                key="target_date",
+                help="The engine counts backward from this date to fetch historical data."
+            )
+        with col2:
+            st.selectbox(
+                "Sampling interval",
+                options=["1d", "1h", "1wk"],
+                format_func=lambda x: {"1d": "Daily", "1h": "Hourly", "1wk": "Weekly"}[x],
+                key="frequency"
+            )
 
-    st.markdown("### Window Calibration")
-    st.number_input("Prediction Horizon (Steps)", min_value=1, value=30, key="future_k")
+    with st.container(border=True):
+        st.subheader("Observation windows")
+        st.number_input("Prediction horizon (steps)", min_value=1, value=30, key="future_k")
 
-    advanced_mode = st.toggle("Advanced / Custom Mode")
+        advanced_mode = st.toggle("Set prior and active windows separately")
 
-    if not advanced_mode:
-        st.success("**Automatic Mode:** Prior and Active windows matched to Prediction Horizon.")
-        st.session_state.K = st.session_state.future_k
-        st.session_state.K_prior = st.session_state.future_k
-    else:
-        st.warning("**Warning:** K and K_prior should mathematically align for optimal stochastic stability.")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.number_input("Active Window (K)", min_value=1, value=st.session_state.future_k, key="K")
-        with c2:
-            st.number_input("Prior Window (K_prior)", min_value=1, value=st.session_state.future_k, key="K_prior")
+        if not advanced_mode:
+            st.caption("Prior and active windows both use the prediction horizon.")
+            st.session_state.K = st.session_state.future_k
+            st.session_state.K_prior = st.session_state.future_k
+        else:
+            st.warning("For a balanced setup, use similar lengths for the prior and active windows.")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.number_input("Active window (K)", min_value=1, value=st.session_state.future_k, key="K")
+            with c2:
+                st.number_input("Prior window (K_prior)", min_value=1, value=st.session_state.future_k, key="K_prior")
 
-    st.markdown("### Systemic Crash Definition")
+    with st.container(border=True):
+        st.subheader("Systemic event threshold")
 
-    num_companies = len(st.session_state.get("tickers", []))
+        num_companies = len(st.session_state.get("tickers", []))
 
-    if num_companies < 3:
-        # Do not construct a slider with an invalid range for N < 3.
-        st.session_state.pop("k_target", None)
-        st.warning(
-            f"Currently selected: {num_companies} companies. Return to Step 1 and select at least 3 companies before running the physics engine."
-        )
-    elif num_companies == 3:
-        # Streamlit sliders require min_value < max_value.
-        st.session_state["k_target"] = 3
-        st.info("With N = 3 selected companies, the threshold is fixed at k = 3.")
-    else:
-        previous_k = st.session_state.get("k_target")
-        if previous_k is None or not (3 <= previous_k <= num_companies):
-            st.session_state["k_target"] = min(max(3, num_companies // 2), num_companies)
+        if num_companies < 3:
+            # Do not construct a slider with an invalid range for N < 3.
+            st.session_state.pop("k_target", None)
+            st.warning(
+                f"Currently selected: {num_companies} companies. Return to Step 1 and select at least 3 companies before running the physics engine."
+            )
+        elif num_companies == 3:
+            # Streamlit sliders require min_value < max_value.
+            st.session_state["k_target"] = 3
+            st.info("With N = 3 selected companies, the threshold is fixed at k = 3.")
+        else:
+            previous_k = st.session_state.get("k_target")
+            if previous_k is None or not (3 <= previous_k <= num_companies):
+                st.session_state["k_target"] = min(max(3, num_companies // 2), num_companies)
 
-        st.slider(
-            f"How many companies out of {num_companies} must default to trigger a 'Systemic Crash' (k)?",
-            min_value=3,
-            max_value=num_companies,
-            key="k_target",
-            help="Defines the threshold k used by the mathematical model; this is a modeling choice, not a validated real-world crash label."
-        )
+            st.slider(
+                f"How many companies out of {num_companies} must default to trigger a 'Systemic Crash' (k)?",
+                min_value=3,
+                max_value=num_companies,
+                key="k_target",
+                help="Defines the threshold k used by the mathematical model; this is a modeling choice, not a validated real-world crash label."
+            )
 
-    if num_companies >= 3:
-        st.info(
-            f"**Model definition:** The threshold is k={st.session_state.k_target} out of the currently selected N={num_companies} assets. This is the model's systemic-event definition, not evidence that these companies will literally default at the same time."
-        )
+        if num_companies >= 3:
+            st.caption(
+                f"**Model definition:** The threshold is k={st.session_state.k_target} out of the currently selected N={num_companies} assets. This is the model's systemic-event definition, not evidence that these companies will literally default at the same time."
+            )
 
     total_needed = st.session_state.K_prior + st.session_state.K + 1
-    st.caption(
-        f"**Data Requirement:** The pipeline will pull {total_needed} '{st.session_state.frequency}' intervals ending on {st.session_state.target_date}.")
+    st.info(f"**Data requirement:** This run needs **{total_needed:,} complete observations** at the selected interval.")
 
-    nav1, nav2 = st.columns([1, 4])
+    nav1, nav2 = st.columns([1, 3], vertical_alignment="bottom")
 
     with nav1:
         st.button("Back", on_click=prev_step)
 
     with nav2:
         st.button(
-            "Run Physics Engine",
+            "Run analysis →",
             on_click=next_step,
             type="primary",
             disabled=num_companies < 3,
+            use_container_width=True,
         )
 
 # ==========================================
 # STEP 3: LIVE EXECUTION & RESULTS
 # ==========================================
 elif st.session_state.step == 3:
-    st.header("3. Analysis Results")
+    st.header("Analysis results")
+    st.write("Review the model output and the data used for this run.")
 
     simulation_success = False
 
-    with st.status("Executing Stochastic Physics Engine...", expanded=True) as status:
+    with st.status("Preparing data and running the model...", expanded=True) as status:
         try:
-            if st.session_state.data_source == "Live Market Data (yfinance)":
+            is_market_data = st.session_state.data_source == "Live Market Data (yfinance)"
+            if is_market_data:
                 st.write("Fetching historical market data...")
-
-                required_rows = int(st.session_state.K_prior) + int(st.session_state.K) + 1
-                raw_df, data_report = provider.get_sliced_portfolio(
-                    all_tickers=st.session_state.all_dataset_tickers,
-                    selected_tickers=st.session_state.tickers,
-                    end_date=st.session_state.target_date,
-                    interval=st.session_state.frequency,
-                    required_rows=required_rows,
-                    replace_incomplete=st.session_state.get("replace_incomplete_assets", True),
-                )
-                st.session_state.data_report = data_report
-
             else:
                 st.write("Processing custom uploaded portfolio data...")
-                raw_df = st.session_state.custom_df.copy()
-                data_report = {
-                    "requested_count": raw_df.shape[1], "final_count": raw_df.shape[1],
-                    "requested_tickers": list(raw_df.columns), "final_tickers": list(raw_df.columns),
-                    "removed": [], "replacements": [], "shortfall": 0,
-                    "observations": len(raw_df), "provider": "User-uploaded CSV",
-                    "note": "CSV data supplied by the user; no market-universe membership metadata."
-                }
-                st.session_state.data_report = data_report
-
-            st.write(
-                f"Structuring Matrix: {raw_df.shape[0]} periods × {raw_df.shape[1]} assets..."
+            st.write("Validating inputs and preparing the model run...")
+            run = run_prediction(
+                data_mode="market" if is_market_data else "csv",
+                k_prior=st.session_state.K_prior,
+                k=st.session_state.K,
+                k_target=st.session_state.get("k_target"),
+                custom_prices=st.session_state.get("custom_df"),
+                all_tickers=st.session_state.get("all_dataset_tickers"),
+                selected_tickers=st.session_state.get("tickers"),
+                target_date=st.session_state.get("target_date"),
+                interval=st.session_state.get("frequency"),
+                replace_incomplete=st.session_state.get("replace_incomplete_assets", True),
             )
+            raw_df = run.prices
+            data_report = run.data_report
+            results = run.model_output
+            N = run.asset_count
+            K = run.k
+            K_prior = run.k_prior
+            k_target = run.k_target
+            st.session_state.data_report = data_report
 
-            if raw_df.shape[1] < 3:
-                raise ValueError("The physics engine requires at least 3 assets.")
-
-            K = st.session_state.K
-            K_prior = st.session_state.K_prior
-            k_target = st.session_state.get("k_target")
-
-            if K < 1 or K_prior < 1:
-                raise ValueError("Both time windows must be at least 1 step.")
-
-            if raw_df.shape[1] < 3:
-                raise ValueError(
-                    f"Only {raw_df.shape[1]} usable assets remain after data validation/replacement. At least 3 are required."
-                )
-            if k_target is None or not (3 <= k_target <= raw_df.shape[1]):
-                raise ValueError(
-                    f"Crash threshold k={k_target} is invalid for the final portfolio size N={raw_df.shape[1]}. "
-                    "Go back and select a valid threshold for the usable portfolio."
-                )
-
-            P_prior, P, N = ma.df_to_math_inputs(raw_df, K_prior, K)
-
-            if N != raw_df.shape[1]:
-                raise ValueError("The asset count does not match the input data.")
-
-            st.write("Calibrating Prior Drift and running Monte Carlo simulations...")
-            results = algorithm.run_algorithm(P_prior, P, N, st.session_state.K_prior, st.session_state.K, k_target)
+            st.write(f"Validated matrix: {raw_df.shape[0]} periods × {raw_df.shape[1]} assets.")
 
             status.update(label="Engine Execution Complete!", state="complete", expanded=False)
             simulation_success = True
@@ -377,10 +366,12 @@ elif st.session_state.step == 3:
         crash_prob_pct = results['crash_probability'] * 100
 
 
-        st.info(
-            f"### Probability of $\\ge {k_target}$ simultaneous crashes: \n"
-            f"# **{crash_prob_pct:.4f} %**"
-        )
+        with st.container(border=True):
+            st.metric(
+                f"Model probability of at least {k_target} simultaneous crashes",
+                f"{crash_prob_pct:.4f}%",
+            )
+            st.caption("This is a model-based estimate for the selected inputs, not a real-world guarantee.")
 
         st.markdown("---")
         st.subheader("Trajectory Visualization")
@@ -419,8 +410,13 @@ elif st.session_state.step == 3:
             showarrow=False,
             font=dict(color="red")
         )
-        fig.update_layout(showlegend=False, hovermode="x unified")
+        fig.update_layout(
+            template="plotly_white",
+            height=540,
+            margin=dict(l=24, r=24, t=64, b=28),
+            showlegend=False,
+            hovermode="x unified",
+        )
         st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.button("Run New Simulation", on_click=reset_wizard)
+    st.button("Start a new analysis", on_click=reset_wizard, use_container_width=True)
